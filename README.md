@@ -53,21 +53,25 @@ precompact-checkpoint-kit/
 ## Install
 
 ```bash
-./install.sh /path/to/your/project
+./install.sh /path/to/your/project            # shared/committed setup
+./install.sh --local /path/to/your/project    # personal setup in a shared repo
 ```
 
-Copies the three hooks and a config into `<project>/.claude/hooks/`, seeds `<project>/memory/` with the three tier files (never clobbering existing ones), and prints the two manual steps:
+The installer copies the hooks and a config into `<project>/.claude/hooks/`, seeds `<project>/memory/` with the three tier files (never clobbering existing ones), **wires the hooks into `<project>/.claude/settings.json`** by idempotent deep-merge (never duplicates a hook, never touches unrelated settings), and **verifies the write path** by firing the hook once and confirming the auto block landed.
 
-1. **Wire the hooks.** Merge `templates/settings.snippet.json` into `<project>/.claude/settings.json` (PreCompact + SessionEnd + Stop).
-2. **Add the protocol.** Paste `templates/CLAUDE.protocol.md` into `<project>/CLAUDE.md` and fill in your status command.
+That leaves one manual step in the default mode: paste `templates/CLAUDE.protocol.md` into `<project>/CLAUDE.md` and fill in your status command. The placement is left to you because the protocol belongs in the file the agent loads, and in a shared repo that's a judgment call.
 
-Then verify the write path (don't assume, check the file):
+**`--local`** is for installing your personal memory tooling into a repo you share with a team without committing it. It additionally writes the protocol to `<project>/CLAUDE.local.md` (a first-party, auto-loaded local-override file) with the status command pre-filled, and adds `memory/`, `.claude/hooks/`, `.claude/settings.json`, and `CLAUDE.local.md` to the repo's **local** git exclude (`.git/info/exclude`, resolved correctly for worktrees) rather than the committed `.gitignore`. Nothing the kit installs ends up staged. `CLAUDE.local.md` auto-loads from your next session onward (memory files load at session start).
+
+To re-verify the write path by hand at any time:
 
 ```bash
 CHECKPOINT_PROJECT_DIR=/path/to/your/project /path/to/your/project/.claude/hooks/checkpoint.sh
 # Confirm a "## Checkpoint (auto)" block with a memory-pressure line is at the
 # top of memory/working-set.md.
 ```
+
+The installer's own behavior (merge, dedupe, idempotency, `--local` artifacts, worktree exclude) is covered by `tests/install.test.sh`.
 
 ## Configure
 

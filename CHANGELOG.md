@@ -3,6 +3,25 @@
 All notable changes to the pre-compaction memory kit. Versioning is [SemVer](https://semver.org).
 Pre-1.0 (`0.y.z`): the layout, protocol, and tool surface may change between minor versions.
 
+## 0.2.0 — 2026-06-23
+
+Installer now does the mechanical wiring instead of printing it as manual steps.
+
+### Added
+- `install.sh` auto-wires the hooks into `<project>/.claude/settings.json` by
+  idempotent deep-merge: never clobbers existing settings, never duplicates a
+  hook (dedupe by event + matcher + command set). Re-running is a no-op.
+- `install.sh --local`: personal install for a shared repo. Writes the protocol
+  to `CLAUDE.local.md` (auto-loaded local override) with the status command
+  pre-filled, and adds the tooling paths to the repo's *local* git exclude
+  (`.git/info/exclude`) instead of the committed `.gitignore`. Worktree-safe:
+  resolves the exclude via `git rev-parse --git-path` since `.git` is a file,
+  not a dir, in a worktree.
+- Installer verifies the write path itself (fires the hook, confirms the auto
+  block landed) instead of leaving it as a manual check.
+- `tests/install.test.sh`: mechanical regression test for the merge, no-clobber,
+  dedupe, idempotency, `--local` artifacts, and worktree exclude resolution.
+
 ## 0.1.0 — 2026-06-20
 
 First tagged version. The mechanical layer is execution-verified on Linux; the
