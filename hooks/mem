@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""mem — structured operations on the markdown memory tiers.
+
+The forget gate has two parts that must NOT be left to prose:
+  - a mechanical check ("does this entry's referenced code still exist?"), and
+  - a hard invariant ("the archive is append-only; never edit it").
+
+This tool owns both, so the agent's judgment is the only thing left to it.
+
+Commands:
+  mem gc-scan        List ledger entries whose file Refs no longer exist on disk
+                     (demote candidates). Advisory: you still decide.
+  mem demote <id>    Move a ledger entry to the archive. Appended VERBATIM;
+                     existing archive entries are never touched. Immutability
+                     is enforced here, structurally.
+  mem ls             List ledger entry ids and their Refs.
+
+Paths resolve under the project root (CHECKPOINT_PROJECT_DIR, else git root,
+else cwd). Override with LEDGER_FILE / ARCHIVE_FILE.
+"""
+import os
+import re
+import subprocess
+import sys
+
+
+def project_root():
+    r = os.environ.get("CHECKPOINT_PROJECT_DIR")
+    if r:
+        return r
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--show-toplevel"], stderr=subprocess.DEVNULL
+        )
+        return out.decode().strip()
+    except Exception:
+        return os.getcwd()
+
+
+ROOT = project_root()
+LEDGER = os.environ.get("LEDGER_FILE", os.path.join(ROOT, "memory/ledger.md"))
+ARCHIVE = os.environ.get("ARCHIVE_FILE", os.path.join(ROOT, "memory/archive.md"))
+
+
+def parse_entries(path):
+    """Return (entries, lines). An entry is a '### ' block up to the next
+    '### ' / '## ' boundary, ignoring lines inside HTML comments."""
+    if not os.path.exists(path):
+        return [], []
+    lines = open(path).read().split("\n")
+    n = len(lines)
+
+    # Entry start lines (outside comments).
+    starts = []
+    in_comment = False
+    for idx, line in enumerate(lines):
+        was_comment = in_comment
+        if "<!--" in line:
+            in_comment = True
+            was_comment = True
+        if "-->" in line:
+            in_comment = False
+        if not was_comment and line.startswith("### "):
+            starts.append(idx)
+
+    entries = []
+    for s in starts:
+        end = n
+        in_c = False
+        for j in range(s + 1, n):
+            line = lines[j]
+            wc = in_c
+            if "<!--" in line:
+                in_c = True
+                wc = True
+            if "-->" in line:
+                in_c = False
+            if wc:
+                continue
+            if line.startswith("### ") or line.startswith("## "):
+                end = j
+                break
+        m = re.match(r"### (\S+)", lines[s])
+        refs = []
+        for line in lines[s:end]:
+            rm = re.match(r"\*\*Refs:\*\*\s*(.*)", line)
+            if rm:
+                for tok in re.split(r"[,\s]+", rm.group(1)):
+                    tok = tok.strip().strip("`").rstrip(".")
+                    if tok:
+                        refs.append(tok)
+        entries.append(
+            {"id": m.group(1) if m else None, "start": s, "end": end, "refs": refs}
+        )
+    return entries, lines
+
+
+def is_filelike(ref):
+    if ref.startswith("#") or "://" in ref:
+        return False
+    path = ref.split(":")[0]
+    return ("/" in path) or bool(re.search(r"\.\w+$", path))
+
+
+def ref_exists(ref):
+    path = ref.split(":")[0]
+    return os.path.exists(os.path.join(ROOT, path))
+
+
+def cmd_gc_scan():
+    entries, _ = parse_entries(LEDGER)
+    candidates = []
+    for e in entries:
+        filerefs = [r for r in e["refs"] if is_filelike(r)]
+        if not filerefs:
+            continue
+        missing = [r for r in filerefs if not ref_exists(r)]
+        if missing and len(missing) == len(filerefs):
+            candidates.append((e["id"], missing))
+    if not candidates:
+        print("no demote candidates: every ledger entry's file Refs exist on disk")
+        return
+    print("demote candidates (all file Refs missing — referenced code is gone):")
+    for eid, missing in candidates:
+        print(f"  {eid}: missing {', '.join(missing)}")
+    print("\nReview each (judgment stays yours), then: mem demote <id>")
+
+
+def cmd_demote(eid):
+    entries, lines = parse_entries(LEDGER)
+    match = [e for e in entries if e["id"] == eid]
+    if not match:
+        print(f"error: no ledger entry with id {eid}", file=sys.stderr)
+        sys.exit(1)
+    e = match[0]
+    block = "\n".join(lines[e["start"]:e["end"]]).rstrip()
+
+    new_ledger = "\n".join(lines[: e["start"]] + lines[e["end"]:])
+    new_ledger = re.sub(r"\n{3,}", "\n\n", new_ledger).rstrip() + "\n"
+    open(LEDGER, "w").write(new_ledger)
+
+    # Append verbatim. This is the ONLY write path to the archive, and it never
+    # reads-then-rewrites existing content, so prior entries cannot be altered.
+    with open(ARCHIVE, "a") as f:
+        f.write("\n" + block + "\n")
+    print(f"demoted {eid}: appended to {ARCHIVE} unchanged, removed from {LEDGER}")
+
+
+def cmd_ls():
+    entries, _ = parse_entries(LEDGER)
+    for e in entries:
+        print(f"{e['id']}\t{' '.join(e['refs'])}")
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "gc-scan":
+        cmd_gc_scan()
+    elif cmd == "demote":
+        if len(sys.argv) < 3:
+            print("usage: mem demote <id>", file=sys.stderr)
+            sys.exit(1)
+        cmd_demote(sys.argv[2])
+    elif cmd == "ls":
+        cmd_ls()
+    else:
+        print("usage: mem {gc-scan | demote <id> | ls}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

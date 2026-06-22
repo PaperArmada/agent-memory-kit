@@ -1,0 +1,7 @@
+You are resuming work in the project at PROJECT_DIR after a context compaction. You have no memory of prior turns; everything you need is on disk.
+
+Start by reading that project's CLAUDE.md and follow its memory protocol exactly, it tells you how to re-orient after a compaction and how to maintain the project's memory files (including any tools it says to use). Do what the protocol says, in the order it says.
+
+Your work task is whatever the "Next step" field records in memory/working-set.md. Implement it in the code. You do NOT need to install packages or run the code; writing the implementation is enough.
+
+Operate only inside PROJECT_DIR. When finished, report concisely: what you read to re-orient, what you implemented and why, and exactly what you did to maintain the memory files (which commands you ran, and why).

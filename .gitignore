@@ -1,0 +1,8 @@
+# Eval run artifacts (fresh per run; never committed)
+evals/_work/
+
+# Checkpoint rate-limit markers (normally in TMPDIR; defensive)
+*.last
+
+# Packaged archives
+*.tar.gz

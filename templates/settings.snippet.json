@@ -1,0 +1,67 @@
+{
+  "_comment": "Merge the hooks block below into your project's .claude/settings.json. The three triggers are all generally available (no project-specific tooling). The optional domain trigger at the bottom is for higher-signal checkpointing if you have a state-machine-like event; delete it otherwise.",
+
+  "hooks": {
+    "PreToolUse": [
+      {
+        "_comment": "IMMUTABILITY GUARD: block direct edits to the append-only archive. All archive writes must go through `mem demote`. Fails open on malformed input, so it can never wedge the session.",
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/guard-archive.sh"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "_comment": "PRIMARY: fires right before auto and manual compaction. Empty matcher = both. CHECKPOINT_FORCE=1 bypasses the rate limit so this critical write never gets skipped. Keep CHECKPOINT_STATE_CMD fast — this hook blocks compaction until it returns.",
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CHECKPOINT_FORCE=1 .claude/hooks/checkpoint.sh"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "_comment": "CRASH BACKUP: PreCompact never fires if the session is killed/crashes. 'other' = abnormal termination. Async, cannot block.",
+        "matcher": "other",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CHECKPOINT_FORCE=1 .claude/hooks/checkpoint.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "_comment": "HEARTBEAT: fires once per agent turn, keeping the file fresh mid-session so PreCompact always has recent state. The rate limit (no FORCE here) smooths rapid turns. Swap for a PostToolUse Edit|Write matcher if you prefer triggering on file changes instead.",
+        "_safety": "This command MUST stay non-blocking (checkpoint.sh always exits 0). NEVER point a Stop hook at a command that exits 2 or returns decision:block to force the agent to 'consolidate/review' — that re-triggers the turn and loops. Consolidation is driven by the CLAUDE.md protocol inside normal turns, never by a blocking hook.",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/checkpoint.sh"
+          }
+        ]
+      }
+    ],
+
+    "_optional_domain_trigger_PostToolUse": [
+      {
+        "_comment": "OPTIONAL: also checkpoint on a meaningful state transition in your own tooling (an MCP tool call, a process step). Rename this key to 'PostToolUse' and set the matcher to your event to enable. Delete if you have none.",
+        "matcher": "mcp__your_tool__state_transition",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/checkpoint.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
