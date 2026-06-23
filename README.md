@@ -57,7 +57,7 @@ precompact-checkpoint-kit/
 ./install.sh --local /path/to/your/project    # personal setup in a shared repo
 ```
 
-The installer copies the hooks and a config into `<project>/.claude/hooks/`, seeds `<project>/memory/` with the three tier files (never clobbering existing ones), **wires the hooks into `<project>/.claude/settings.json`** by idempotent deep-merge (never duplicates a hook, never touches unrelated settings), and **verifies the write path** by firing the hook once and confirming the auto block landed.
+The installer copies the hooks and a config into `<project>/.claude/hooks/`, seeds `<project>/memory/` with the three tier files (never clobbering existing ones), **wires the hooks into `<project>/.claude/settings.json`** by idempotent deep-merge (never duplicates a hook, never touches unrelated settings), and **verifies the write path** by firing the hook once and confirming the auto block landed. In a git repo (default mode) it also **splits the tiers' git treatment**: `memory/working-set.md` is git-ignored (per-effort and volatile), while `memory/ledger.md` and `memory/archive.md` stay committed and shared, with `archive.md` set to `union` merge so parallel branches' appends combine without conflict. See [Parallel development](#parallel-development-worktrees).
 
 That leaves one manual step in the default mode: paste `templates/CLAUDE.protocol.md` into `<project>/CLAUDE.md` and fill in your status command. The placement is left to you because the protocol belongs in the file the agent loads, and in a shared repo that's a judgment call.
 
@@ -71,7 +71,50 @@ CHECKPOINT_PROJECT_DIR=/path/to/your/project /path/to/your/project/.claude/hooks
 # top of memory/working-set.md.
 ```
 
-The installer's own behavior (merge, dedupe, idempotency, `--local` artifacts, worktree exclude) is covered by `tests/install.test.sh`.
+The installer's own behavior (merge, dedupe, idempotency, `--local` artifacts, worktree exclude, tier git treatment) is covered by `tests/install.test.sh`.
+
+## Parallel development (worktrees)
+
+Memory is just files in the project, so every session in a project shares it. For
+parallel work, two features in flight at once, the tiers are scoped differently by
+design:
+
+| Tier | Scope | Git treatment (default mode) |
+|---|---|---|
+| working-set | the *effort* | git-ignored; each worktree/branch has its own, never merged |
+| ledger + archive | the *project* | committed and shared; merged across branches |
+
+The pattern is **one git worktree per feature**:
+
+```bash
+git worktree add ../proj-featureX -b featureX
+```
+
+Each worktree is a separate directory, so each gets its **own** `working-set.md`
+(its own "Now"), no collision, no locking needed. (A fresh worktree starts
+*without* the file: it's git-ignored, so it doesn't travel; the checkpoint hook
+recreates it on first fire. This is why the hooks must be committed in shared
+mode, so a new worktree has them.) The shared `ledger.md` and `archive.md` travel
+on the branch and merge when it does:
+
+- **archive** is append-only and set to `merge=union`, so entries added on
+  parallel branches all survive the merge with no git conflict (verified). Note
+  `union` keeps both sides verbatim and does not deduplicate, see MEMORY-MODEL.
+- **ledger** uses the default merge; it's small, so a concurrent promote/demote
+  conflict is rare and human-resolvable.
+
+The installer writes these git settings and seeds the tiers but **commits
+nothing**. To actually share them (and enable the union merge on other clones),
+commit `.gitignore`, `.gitattributes`, `memory/ledger.md`, and
+`memory/archive.md` yourself. Switching an already-installed repo between default
+and `--local` leaves the prior mode's git settings in place; the installer warns
+when it detects that, but does not auto-undo them.
+
+Git is the concurrency control. The one unsafe case is **two sessions in the same
+directory** (two terminals, one path): they race on the same files with no lock.
+Use a worktree per effort instead. `--local` mode is a different axis, it keeps
+*all* of memory personal and uncommitted (for using the kit in a team repo that
+hasn't adopted it), so it does not share ledger/archive across efforts.
 
 ## Configure
 

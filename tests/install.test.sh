@@ -74,6 +74,44 @@ EX4="$(cd "${T4}/wt" && git rev-parse --git-path info/exclude)"; case "${EX4}" i
 check "worktree exclude path resolved + written" "[ -f '${EX4}' ] && grep -qxF '.claude/hooks/' '${EX4}'"
 check "worktree CLAUDE.local.md written"          "[ -f '${T4}/wt/CLAUDE.local.md' ]"
 
+echo "== test 5: default mode splits git treatment of the memory tiers =="
+T5="${WORK}/t5"; mkdir -p "${T5}"
+( cd "${T5}" && git init -q )
+bash "${INSTALL}" "${T5}" >/dev/null 2>&1
+check "working-set.md git-ignored"          "git -C '${T5}' check-ignore -q memory/working-set.md"
+check "ledger.md NOT git-ignored"           "! git -C '${T5}' check-ignore -q memory/ledger.md"
+check "archive.md NOT git-ignored"          "! git -C '${T5}' check-ignore -q memory/archive.md"
+check "archive set to union merge"          "grep -qxF 'memory/archive.md merge=union' '${T5}/.gitattributes'"
+bash "${INSTALL}" "${T5}" >/dev/null 2>&1
+check "gitignore entry not duplicated"      "[ \"\$(grep -cxF 'memory/working-set.md' '${T5}/.gitignore')\" = '1' ]"
+check "gitattributes entry not duplicated"  "[ \"\$(grep -cxF 'memory/archive.md merge=union' '${T5}/.gitattributes')\" = '1' ]"
+
+echo "== test 6: --local does NOT add the shared-mode git treatment =="
+# In --local mode all of memory/ is excluded personally; the committed .gitignore
+# / .gitattributes should not gain the shared-mode entries.
+check "no committed .gitignore working-set entry" "[ ! -f '${T2}/.gitignore' ] || ! grep -qxF 'memory/working-set.md' '${T2}/.gitignore'"
+check "no committed union .gitattributes"          "[ ! -f '${T2}/.gitattributes' ] || ! grep -qxF 'memory/archive.md merge=union' '${T2}/.gitattributes'"
+
+echo "== test 7: default->--local warns about leftover shared-mode git config =="
+T7="${WORK}/t7"; mkdir -p "${T7}"; ( cd "${T7}" && git init -q )
+bash "${INSTALL}" "${T7}" >/dev/null 2>&1               # default adds .gitignore/.gitattributes
+OUT7="$(bash "${INSTALL}" --local "${T7}" 2>&1)"        # then switch to --local
+check "shared .gitignore entry still present"  "grep -qxF 'memory/working-set.md' '${T7}/.gitignore'"
+check "--local warns about leftover shared config" "printf '%s' \"\${OUT7}\" | grep -q 'shared-mode git config'"
+
+echo "== test 8: pre-tracked working-set is detected (ignore would be inert) =="
+T8="${WORK}/t8"; mkdir -p "${T8}/memory"; ( cd "${T8}" && git init -q )
+echo "# Working Set" > "${T8}/memory/working-set.md"
+( cd "${T8}" && git add memory/working-set.md && git -c core.hooksPath=/dev/null commit -q --no-verify -m ws )
+OUT8="$(bash "${INSTALL}" "${T8}" 2>&1)"
+check "warns tracked working-set makes ignore inert" "printf '%s' \"\${OUT8}\" | grep -q 'already git-tracked'"
+
+echo "== test 9: --local->default warns shared tiers are still ignored =="
+T9="${WORK}/t9"; mkdir -p "${T9}"; ( cd "${T9}" && git init -q )
+bash "${INSTALL}" --local "${T9}" >/dev/null 2>&1       # excludes all of memory/
+OUT9="$(bash "${INSTALL}" "${T9}" 2>&1)"                # then switch to default
+check "warns shared tiers won't commit after --local" "printf '%s' \"\${OUT9}\" | grep -q 'shared memory tiers will NOT commit'"
+
 echo
 echo "passed: ${PASS}  failed: ${FAIL}"
 [ "${FAIL}" -eq 0 ]

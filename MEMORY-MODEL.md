@@ -77,3 +77,14 @@ What this is **not**: learned adaptation. There is no reward signal and no cross
 4. **On resume (session start / post-compaction):** read the auto block, then the working set, then the relevant ledger entries. Recall from the archive by query only when a specific lost detail is needed.
 
 The hook guarantees step 1's structural envelope is always fresh and reminds at step 2. Steps 1-3's semantic content and step 4's reading are agent acts, by design, because nothing else can perform them.
+
+## Sharing and parallel efforts
+
+The tiers are files in the project, so every session in that project sees the same memory. The three tiers have different sharing semantics, and that difference is what lets parallel development work:
+
+- **working-set is per-effort.** Each line of work (worktree, branch, session) has its own "Now". It is volatile, not merged or shared; the default install git-ignores it. A single shared working-set would make parallel efforts clobber each other, since the agent overwrites it in place.
+- **ledger and archive are project-wide.** Decisions and the immutable record belong to the project, not a feature, so they are committed and shared. They travel on a feature branch and integrate when it merges.
+
+This is where the archive's append-only rule earns a second keep: an append-only log merges without git conflicts under a `union` merge driver. Be precise about what `union` does, though: it keeps the lines from *both* sides verbatim, it does not deduplicate or semantically reconcile. So parallel branches that append distinct entries combine correctly, but it is "no conflict markers," not "semantically merged"; identical or overlapping additions can end up duplicated rather than flagged. That is the right trade for an immutable record (never lose an entry), not a general-purpose merge. The ledger, which is rewritten on demote, keeps the default merge and tolerates rare, human-resolvable conflicts.
+
+The operational pattern is one git worktree per feature; git is the concurrency control. The flat-file model has no lock, so two sessions in the *same* directory is unsafe, use separate worktrees. See "Parallel development" in README.md.

@@ -3,6 +3,39 @@
 All notable changes to the pre-compaction memory kit. Versioning is [SemVer](https://semver.org).
 Pre-1.0 (`0.y.z`): the layout, protocol, and tool surface may change between minor versions.
 
+## 0.3.0 — 2026-06-23
+
+Parallel-development support: the memory tiers now have distinct, explicit git
+treatment so multiple efforts can work the same project without clobbering.
+
+### Added
+- Default-mode install splits the tiers' git treatment: `memory/working-set.md`
+  is git-ignored (per-effort, volatile), while `memory/ledger.md` and
+  `memory/archive.md` stay committed and shared. `memory/archive.md` is set to a
+  `union` merge in `.gitattributes`, so its append-only entries from parallel
+  branches merge with no conflict (verified end-to-end). Both edits are
+  idempotent; `--local` mode does not add them (all of memory/ stays personal).
+- README "Parallel development (worktrees)" section and a MEMORY-MODEL "Sharing
+  and parallel efforts" section: one worktree per feature, working-set
+  per-effort, ledger/archive shared and merged, git as concurrency control,
+  same-directory sessions called out as unsafe.
+- Installer detects and *warns* (never auto-mutates git state) when a prior-mode
+  or pre-existing state would make its messages untrue: an already-tracked
+  `memory/working-set.md` (the ignore line would be inert), shared tiers ignored
+  by a leftover `--local` exclude (they would not commit), and shared-mode git
+  config left behind when switching to `--local`. The clean happy path stays
+  silent.
+- `tests/install.test.sh` covers the new git treatment (ignore, union attribute,
+  idempotency), that `--local` omits the shared-mode entries, and the three
+  conflict-detection warnings (default↔--local switches, pre-tracked working-set).
+
+### Docs
+- Clarified that `union` merge keeps both sides *verbatim* (no dedup or semantic
+  reconcile), that a fresh worktree's `working-set.md` is created by the hook on
+  first fire (not provided by git), and that the installer commits nothing, the
+  user must commit `.gitignore`/`.gitattributes`/`ledger.md`/`archive.md` to
+  actually share them.
+
 ## 0.2.0 — 2026-06-23
 
 Installer now does the mechanical wiring instead of printing it as manual steps.

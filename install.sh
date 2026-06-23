@@ -16,6 +16,12 @@
 #             local git exclude (worktree-safe). Without --local, the protocol
 #             paste into the shared CLAUDE.md is left as a printed manual step,
 #             since that placement is a judgment call.
+#
+#   Default (shared) mode also splits the git treatment of the memory tiers:
+#   memory/working-set.md is git-ignored (per-effort and volatile), while
+#   ledger.md and archive.md stay committed and shared. archive.md is given a
+#   `union` merge driver so its append-only entries from parallel branches merge
+#   without conflicts. See "Parallel development" in README.md.
 
 set -euo pipefail
 
@@ -157,6 +163,66 @@ if [[ "${LOCAL}" -eq 1 ]]; then
   else
     echo "note: ${TARGET} is not a git repo; skipped local git-exclude step"
   fi
+
+  # Reverse-mode check: shared-mode git config from a prior default install leaks
+  # the kit into the committed tree; --local users usually do not want that.
+  if grep -qxF "memory/working-set.md" "${TARGET}/.gitignore" 2>/dev/null \
+     || grep -qxF "memory/archive.md merge=union" "${TARGET}/.gitattributes" 2>/dev/null; then
+    echo "WARNING: shared-mode git config (.gitignore / .gitattributes from a prior default" >&2
+    echo "         install) is present in the tree. --local keeps memory personal; remove" >&2
+    echo "         those lines if you do not want them committed." >&2
+  fi
+fi
+
+# --- Shared mode: split the git treatment of the memory tiers ----------------
+# working-set.md is volatile and per-effort (each worktree/branch/session has its
+# own "Now"); committing it would collide across parallel efforts and churn merge
+# diffs, so it is git-ignored. ledger.md and archive.md are shared project memory
+# and stay committed. The archive is append-only, so a `union` merge driver
+# integrates entries from parallel branches without conflicts (it keeps both
+# sides) — that is what lets parallel development merge cleanly. ledger.md keeps
+# the default merge (it is small; conflicts are rare and human-resolvable). In
+# --local mode all of memory/ is already excluded above, so this is skipped.
+if [[ "${LOCAL}" -eq 0 ]]; then
+  if git -C "${TARGET}" rev-parse --git-dir >/dev/null 2>&1; then
+    add_line() { # file, exact-line  -> 0 if appended, 1 if already present
+      local f="$1" line="$2"
+      grep -qxF "${line}" "${f}" 2>/dev/null && return 1
+      if [[ -s "${f}" && -n "$(tail -c1 "${f}" 2>/dev/null)" ]]; then printf '\n' >> "${f}"; fi
+      printf '%s\n' "${line}" >> "${f}"
+      return 0
+    }
+    if add_line "${TARGET}/.gitignore" "memory/working-set.md"; then
+      echo "git-ignored (shared): memory/working-set.md  (per-effort)"
+    else
+      echo "git-ignore already excludes memory/working-set.md"
+    fi
+    if add_line "${TARGET}/.gitattributes" "memory/archive.md merge=union"; then
+      echo "git-attribute (shared): memory/archive.md merge=union  (append-only entries merge without git conflicts)"
+    else
+      echo "git-attribute already set: memory/archive.md merge=union"
+    fi
+
+    # Truthfulness checks — the happy-path messages above assume a clean slate.
+    # A .gitignore line is inert on an already-tracked file; and the shared tiers
+    # cannot be committed if a broader rule already ignores them (most often a
+    # prior `--local` install's info/exclude 'memory/'). Warn instead of silently
+    # printing success, but do not auto-mutate the user's git state.
+    if git -C "${TARGET}" ls-files --error-unmatch memory/working-set.md >/dev/null 2>&1; then
+      echo "WARNING: memory/working-set.md is already git-tracked, so the ignore is inert." >&2
+      echo "         Stop committing it:  git -C \"${TARGET}\" rm --cached memory/working-set.md" >&2
+    fi
+    for shared in memory/ledger.md memory/archive.md; do
+      if git -C "${TARGET}" check-ignore -q "${shared}" 2>/dev/null \
+         && ! git -C "${TARGET}" ls-files --error-unmatch "${shared}" >/dev/null 2>&1; then
+        echo "WARNING: ${shared} is git-ignored by an existing rule and not yet tracked, so the" >&2
+        echo "         shared memory tiers will NOT commit (likely a prior '--local' install)." >&2
+        echo "         Inspect and remove the rule:  git -C \"${TARGET}\" check-ignore -v ${shared}" >&2
+      fi
+    done
+  else
+    echo "note: ${TARGET} is not a git repo; skipped shared-mode git treatment (working-set ignore, archive union-merge)"
+  fi
 fi
 
 # --- Verify the write path once, so we don't just assume it works ------------
@@ -185,6 +251,10 @@ judgment call, so it isn't auto-applied):
   ${TARGET}/CLAUDE.md and fill in your status command. For a SHARED repo where
   the protocol should stay personal, re-run with --local to put it in
   CLAUDE.local.md and git-exclude the tooling instead.
+
+Memory sharing: working-set.md is git-ignored (per-effort); ledger.md and
+archive.md are committed and shared (archive set to union-merge). For parallel
+features, use one git worktree per effort — see "Parallel development" in README.
 
 Design rationale and the tier/gate model: see MEMORY-MODEL.md.
 EOF
