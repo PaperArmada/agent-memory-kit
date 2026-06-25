@@ -112,6 +112,45 @@ bash "${INSTALL}" --local "${T9}" >/dev/null 2>&1       # excludes all of memory
 OUT9="$(bash "${INSTALL}" "${T9}" 2>&1)"                # then switch to default
 check "warns shared tiers won't commit after --local" "printf '%s' \"\${OUT9}\" | grep -q 'shared memory tiers will NOT commit'"
 
+echo "== test 10: install records version state and prints the delta =="
+T10="${WORK}/t10"; mkdir -p "${T10}"; ( cd "${T10}" && git init -q )
+OUT10="$(bash "${INSTALL}" "${T10}" 2>&1)"
+ST10="${T10}/.claude/hooks/.agent-memory-kit.json"
+check "state file written"                "[ -f '${ST10}' ]"
+check "state records current version"     "[ \"\$(python3 -c \"import json;print(json.load(open('${ST10}'))['version'])\")\" = \"\$(cat '${KIT_DIR}/VERSION')\" ]"
+check "fresh install prints 'installed:'"  "printf '%s' \"\${OUT10}\" | grep -q 'installed: agent-memory-kit'"
+OUT10B="$(bash "${INSTALL}" "${T10}" 2>&1)"
+check "re-run prints 'reinstalled:'"       "printf '%s' \"\${OUT10B}\" | grep -q 'reinstalled: agent-memory-kit'"
+
+echo "== test 11: --check reports installed vs available without mutating =="
+OUT11="$(bash "${INSTALL}" --check "${T10}" 2>&1)"
+check "--check reports up to date"         "printf '%s' \"\${OUT11}\" | grep -q 'up to date'"
+T11="${WORK}/t11"; mkdir -p "${T11}"
+OUT11B="$(bash "${INSTALL}" --check "${T11}" 2>&1)"
+check "--check on uninstalled: not installed" "printf '%s' \"\${OUT11B}\" | grep -q 'installed=(not installed)'"
+check "--check did not create hooks dir"   "[ ! -d '${T11}/.claude/hooks' ]"
+
+echo "== test 12: update prunes a hook (and its wiring) the new version dropped =="
+T12="${WORK}/t12"; mkdir -p "${T12}"; ( cd "${T12}" && git init -q )
+bash "${INSTALL}" "${T12}" >/dev/null 2>&1
+ST12="${T12}/.claude/hooks/.agent-memory-kit.json"
+python3 - "${ST12}" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1])); d["version"]="0.0.0"; d["hooks"].append("oldhook.sh")
+json.dump(d,open(sys.argv[1],"w"))
+PY
+echo 'echo x' > "${T12}/.claude/hooks/oldhook.sh"
+python3 - "${T12}/.claude/settings.json" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+d["hooks"].setdefault("Stop",[]).append({"matcher":"","hooks":[{"type":"command","command":".claude/hooks/oldhook.sh"}]})
+json.dump(d,open(sys.argv[1],"w"))
+PY
+bash "${INSTALL}" "${T12}" >/dev/null 2>&1
+check "stale hook file removed"            "[ ! -f '${T12}/.claude/hooks/oldhook.sh' ]"
+check "stale settings group removed"       "! grep -q 'oldhook.sh' '${T12}/.claude/settings.json'"
+check "current hooks survive prune"        "[ -f '${T12}/.claude/hooks/checkpoint.sh' ] && [ -f '${T12}/.claude/hooks/mem' ]"
+
 echo
 echo "passed: ${PASS}  failed: ${FAIL}"
 [ "${FAIL}" -eq 0 ]

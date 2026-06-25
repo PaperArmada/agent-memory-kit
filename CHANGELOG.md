@@ -3,6 +3,25 @@
 All notable changes to the pre-compaction memory kit. Versioning is [SemVer](https://semver.org).
 Pre-1.0 (`0.y.z`): the layout, protocol, and tool surface may change between minor versions.
 
+## 0.4.0 — 2026-06-23
+
+Update story for existing consumers: versioned, self-cleaning re-install.
+
+### Added
+- `install.sh` records the installed version and the set of hooks it manages in
+  `.claude/hooks/.agent-memory-kit.json`, and prints a delta on re-run
+  (`installed: … 0.4.0` / `reinstalled: …` / `updated: 0.3.0 -> 0.4.0`).
+- Re-install now **prunes** hooks a prior version placed but the current one no
+  longer ships, plus their settings.json hook groups (manifest-driven, so only
+  kit-managed files are touched — never the user's own hooks/wiring).
+- `install.sh --check <project>`: report installed-vs-available version and
+  whether an update is due, mutating nothing (does not even create directories).
+- README "Updating" section: pull a tag, re-run `install.sh`; `--check` to see
+  drift; releases are tagged with CHANGELOG notes.
+- `tests/install.test.sh`: version-state stamp + delta, `--check` (installed and
+  uninstalled), and prune-on-update (stale hook file + its settings group
+  removed, current hooks preserved).
+
 ## 0.3.0 — 2026-06-23
 
 Parallel-development support: the memory tiers now have distinct, explicit git

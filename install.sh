@@ -28,17 +28,19 @@ set -euo pipefail
 KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 LOCAL=0
+CHECK=0
 TARGET=""
 for arg in "$@"; do
   case "$arg" in
     --local) LOCAL=1 ;;
+    --check) CHECK=1 ;;
     -*) echo "error: unknown flag: $arg" >&2; exit 1 ;;
     *) TARGET="$arg" ;;
   esac
 done
 
 if [[ -z "${TARGET}" ]]; then
-  echo "usage: ./install.sh [--local] /path/to/target/project" >&2
+  echo "usage: ./install.sh [--local] [--check] /path/to/target/project" >&2
   exit 1
 fi
 if [[ ! -d "${TARGET}" ]]; then
@@ -50,14 +52,56 @@ TARGET="$(cd "${TARGET}" && pwd)"
 HOOKS_DIR="${TARGET}/.claude/hooks"
 MEM_DIR="${TARGET}/memory"
 SETTINGS="${TARGET}/.claude/settings.json"
+STATE="${HOOKS_DIR}/.agent-memory-kit.json"   # install state: version + managed hooks
+KIT_VERSION="$(cat "${KIT_DIR}/VERSION" 2>/dev/null || echo "unknown")"
+HOOKS=(checkpoint.sh recall.sh memory-metrics.sh mem guard-archive.sh)
+
+state_version() { # echo the version recorded in the target's state file, else empty
+  [[ -f "${STATE}" ]] || { echo ""; return; }
+  python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('version',''))" "${STATE}" 2>/dev/null || echo ""
+}
+
+# --check: report installed vs available and exit, mutating nothing.
+if [[ "${CHECK}" -eq 1 ]]; then
+  installed="$(state_version)"; [[ -z "${installed}" ]] && installed="(not installed)"
+  echo "agent-memory-kit: installed=${installed}  available=${KIT_VERSION}  (${TARGET})"
+  if [[ "${installed}" == "${KIT_VERSION}" ]]; then
+    echo "up to date"
+  else
+    echo "update available — re-run: ./install.sh ${TARGET}"
+  fi
+  exit 0
+fi
+
 mkdir -p "${HOOKS_DIR}" "${MEM_DIR}"
+OLD_VERSION="$(state_version)"
 
 # --- Hooks (always refreshed; they carry no project state) -------------------
-for h in checkpoint.sh recall.sh memory-metrics.sh mem guard-archive.sh; do
+for h in "${HOOKS[@]}"; do
   cp "${KIT_DIR}/hooks/${h}" "${HOOKS_DIR}/${h}"
   chmod +x "${HOOKS_DIR}/${h}"
   echo "installed: ${HOOKS_DIR}/${h}"
 done
+
+# --- Prune hooks a prior version placed but the current one no longer ships ---
+# Manifest-driven, so only kit-managed files are removed (never the user's own
+# hooks). REMOVED also drives settings-group pruning in the merge step below.
+REMOVED="$(python3 - "${STATE}" "${HOOKS_DIR}" "${HOOKS[@]}" <<'PY'
+import json, os, sys
+state_path, hooks_dir, current = sys.argv[1], sys.argv[2], set(sys.argv[3:])
+old = []
+if os.path.exists(state_path):
+    try: old = json.load(open(state_path)).get("hooks", [])
+    except Exception: old = []
+removed = [h for h in old if h not in current]
+for h in removed:
+    p = os.path.join(hooks_dir, h)
+    if os.path.isfile(p):
+        os.remove(p)
+print(" ".join(removed))
+PY
+)"
+[[ -n "${REMOVED}" ]] && echo "pruned removed hooks: ${REMOVED}"
 
 # --- Config (never clobber an edited one) ------------------------------------
 if [[ ! -f "${HOOKS_DIR}/checkpoint.config.sh" ]]; then
@@ -83,10 +127,11 @@ done
 # merges the result into the target settings.json. Re-running never duplicates a
 # hook (dedupe by event + matcher + command set) and never touches unrelated
 # settings. python3 is a stated kit requirement.
-python3 - "${KIT_DIR}/templates/settings.snippet.json" "${SETTINGS}" <<'PY'
+python3 - "${KIT_DIR}/templates/settings.snippet.json" "${SETTINGS}" "${REMOVED}" <<'PY'
 import json, sys, os
 
 snippet_path, settings_path = sys.argv[1], sys.argv[2]
+removed_hooks = sys.argv[3].split() if len(sys.argv) > 3 and sys.argv[3].strip() else []
 
 with open(snippet_path) as f:
     snippet = json.load(f)
@@ -122,12 +167,38 @@ for event, groups in desired.items():
             existing.add(sig(g))
             added += 1
 
+# Prune hook groups that invoke a kit hook this version removed, so the wiring
+# does not dangle after a hook is dropped or renamed.
+pruned = 0
+if removed_hooks:
+    def refs_removed(group):
+        for h in group.get("hooks", []):
+            cmd = h.get("command", "")
+            if any(f".claude/hooks/{r}" in cmd for r in removed_hooks):
+                return True
+        return False
+    for event in list(hooks.keys()):
+        before = len(hooks[event])
+        hooks[event] = [g for g in hooks[event] if not refs_removed(g)]
+        pruned += before - len(hooks[event])
+        if not hooks[event]:
+            del hooks[event]
+
 with open(settings_path, "w") as f:
     json.dump(settings, f, indent=2)
     f.write("\n")
 
-print(f"settings: wired {added} new hook group(s) into {settings_path}"
-      if added else f"settings: already wired, no change ({settings_path})")
+msg = f"settings: wired {added} new hook group(s)" if added else "settings: already wired, no change"
+if pruned:
+    msg += f", pruned {pruned} stale group(s)"
+print(f"{msg} ({settings_path})")
+PY
+
+# --- Record install state (version + managed hooks) for future updates -------
+python3 - "${STATE}" "${KIT_VERSION}" "${HOOKS[@]}" <<'PY'
+import json, sys
+json.dump({"version": sys.argv[2], "hooks": list(sys.argv[3:])}, open(sys.argv[1], "w"), indent=2)
+open(sys.argv[1], "a").write("\n")
 PY
 
 # --- Local mode: keep the tooling personal and uncommitted -------------------
@@ -231,6 +302,15 @@ if CHECKPOINT_PROJECT_DIR="${TARGET}" CHECKPOINT_FORCE=1 "${HOOKS_DIR}/checkpoin
   echo "verified: checkpoint hook wrote the auto block to ${MEM_DIR}/working-set.md"
 else
   echo "WARNING: checkpoint hook did not produce an auto block; check ${HOOKS_DIR}/checkpoint.sh manually" >&2
+fi
+
+# --- Version delta ------------------------------------------------------------
+if [[ -z "${OLD_VERSION}" ]]; then
+  echo "installed: agent-memory-kit ${KIT_VERSION}"
+elif [[ "${OLD_VERSION}" == "${KIT_VERSION}" ]]; then
+  echo "reinstalled: agent-memory-kit ${KIT_VERSION}"
+else
+  echo "updated: agent-memory-kit ${OLD_VERSION} -> ${KIT_VERSION}"
 fi
 
 # --- Remaining manual step ----------------------------------------------------
