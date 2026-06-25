@@ -63,6 +63,14 @@ That leaves one manual step in the default mode: paste `templates/CLAUDE.protoco
 
 **`--local`** is for installing your personal memory tooling into a repo you share with a team without committing it. It additionally writes the protocol to `<project>/CLAUDE.local.md` (a first-party, auto-loaded local-override file) with the status command pre-filled, and adds `memory/`, `.claude/hooks/`, `.claude/settings.json`, and `CLAUDE.local.md` to the repo's **local** git exclude (`.git/info/exclude`, resolved correctly for worktrees) rather than the committed `.gitignore`. Nothing the kit installs ends up staged. `CLAUDE.local.md` auto-loads from your next session onward (memory files load at session start).
 
+**`--global`** installs once and covers every project automatically — no per-project setup, including new repos and worktrees created mid-session:
+
+```bash
+/path/to/agent-memory-kit/install.sh --global
+```
+
+It places the hooks in `~/.claude/hooks/`, wires them into `~/.claude/settings.json` with absolute paths, writes the protocol into `~/.claude/CLAUDE.md` as a marked managed block, and adds `memory/working-set*.md` to your global git ignore. The hooks resolve the project from each session's working directory, so one copy serves everything. **Memory stays local**: nothing is committed, and a `CHECKPOINT_REQUIRE_GIT` guard confines writes to git work trees, so `memory/` is never created in a non-repo directory like `$HOME`. Re-run to update (idempotent); `--global --check` reports the installed version. A per-project install still works and takes precedence via its own adjacent config. Choose this when you want the kit's behavior everywhere with memory kept personal; choose default/`--local` when you want to scope or share a specific repo's memory.
+
 To re-verify the write path by hand at any time:
 
 ```bash
@@ -71,7 +79,7 @@ CHECKPOINT_PROJECT_DIR=/path/to/your/project /path/to/your/project/.claude/hooks
 # top of memory/working-set.md.
 ```
 
-The installer's own behavior (merge, dedupe, idempotency, `--local` artifacts, worktree exclude, tier git treatment) is covered by `tests/install.test.sh`. `tests/mem.test.sh` covers the per-session working set and the forget gate. `tests/robustness.sh` reproduces antithetical-usage failures (same-directory concurrency, ledger garbage) against the installed kit and reports SAFE/UNSAFE per scenario (`--strict` to gate).
+The installer's own behavior (merge, dedupe, idempotency, `--local` artifacts, worktree exclude, tier git treatment) is covered by `tests/install.test.sh`. `tests/mem.test.sh` covers the per-session working set and the forget gate. `tests/robustness.sh` reproduces antithetical-usage failures (same-directory concurrency, ledger garbage) against the installed kit and reports SAFE/UNSAFE per scenario (`--strict` to gate). `tests/global.test.sh` covers `--global` in a sandboxed `HOME` (absolute wiring, the git-only write guard, cwd resolution, idempotency).
 
 ## Parallel development (worktrees)
 
@@ -187,7 +195,7 @@ The hook guarantees the structure is fresh; you and the agent (per the protocol)
 
 `bash` (3.2+), `git`, `python3`, `awk`, and standard coreutils. No packages to install.
 
-> Status: **v0.5.0**, pre-1.0 (SemVer): layout, protocol, and tool surface may change between minor versions. The mechanical layer is execution-verified on Linux; the semantic layer has a baseline eval suite in [`evals/BASELINE.md`](evals/BASELINE.md).
+> Status: **v0.6.0**, pre-1.0 (SemVer): layout, protocol, and tool surface may change between minor versions. The mechanical layer is execution-verified on Linux; the semantic layer has a baseline eval suite in [`evals/BASELINE.md`](evals/BASELINE.md).
 
 ### Portability (macOS / BSD): statically reviewed, not yet run
 

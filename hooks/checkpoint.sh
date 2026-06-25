@@ -35,7 +35,29 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -f "${SCRIPT_DIR}/checkpoint.config.sh" ]] && source "${SCRIPT_DIR}/checkpoint.config.sh"
 
 # --- Resolve configuration ---------------------------------------------------
-PROJECT_DIR="${CHECKPOINT_PROJECT_DIR:-$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel 2>/dev/null || pwd)}"
+# Resolve the project from the SESSION's working directory (where Claude Code runs
+# the hook), not the script's location — so a single global install in
+# ~/.claude/hooks serves every project. CHECKPOINT_PROJECT_DIR overrides (used by
+# the installer and tests).
+if [[ -n "${CHECKPOINT_PROJECT_DIR:-}" ]]; then
+  PROJECT_DIR="${CHECKPOINT_PROJECT_DIR}"
+else
+  # Resolve from the visible cwd; ignore an inherited GIT_DIR/GIT_WORK_TREE so a
+  # directory that exports them cannot steer where memory is written. (Worktrees
+  # use a .git file, not these env vars, so this does not affect them.)
+  GIT_ROOT="$(unset GIT_DIR GIT_WORK_TREE; git rev-parse --show-toplevel 2>/dev/null || true)"
+  # CHECKPOINT_REQUIRE_GIT=1 (set by the global install) confines writes to git
+  # work trees, so a global hook never creates memory/ in an arbitrary directory.
+  # It ALSO refuses $HOME itself: a dotfiles repo would otherwise make the home
+  # directory look like a project and accumulate a memory/ tree there.
+  if [[ "${CHECKPOINT_REQUIRE_GIT:-0}" == "1" ]]; then
+    HOME_REAL="$(cd "${HOME:-/nonexistent}" 2>/dev/null && pwd -P || printf '%s' "${HOME:-}")"
+    if [[ -z "${GIT_ROOT}" || "${GIT_ROOT}" == "${HOME}" || "${GIT_ROOT}" == "${HOME_REAL}" ]]; then
+      exit 0
+    fi
+  fi
+  PROJECT_DIR="${GIT_ROOT:-$(pwd)}"
+fi
 STATE_CMD="${CHECKPOINT_STATE_CMD:-}"
 STATE_MAX_LINES="${CHECKPOINT_STATE_MAX_LINES:-12}"
 RATE_SECONDS="${CHECKPOINT_RATE_SECONDS:-10}"

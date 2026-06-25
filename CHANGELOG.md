@@ -3,6 +3,34 @@
 All notable changes to the pre-compaction memory kit. Versioning is [SemVer](https://semver.org).
 Pre-1.0 (`0.y.z`): the layout, protocol, and tool surface may change between minor versions.
 
+## 0.6.0 — 2026-06-25
+
+Global install: leverage the kit across every project automatically, with no
+per-project setup, while keeping memory local.
+
+### Added
+- `install.sh --global` installs the hooks into `~/.claude/hooks`, wires them
+  into `~/.claude/settings.json` with absolute command paths (idempotent
+  deep-merge), writes the memory protocol into `~/.claude/CLAUDE.md` as a marked
+  managed block, and ignores the volatile tier via the global git ignore
+  (`~/.config/git/ignore`). Every session in any git project then gets the memory
+  hooks and protocol automatically — existing projects, new repos, and worktrees
+  created mid-session. Memory stays LOCAL: nothing is committed.
+- The hooks now resolve the project from the session's working directory (not the
+  script's location), so one global copy serves every project. A new
+  `CHECKPOINT_REQUIRE_GIT` guard (set by the global config) confines writes to git
+  work trees, so a global hook never creates `memory/` in an arbitrary directory
+  such as `$HOME`. Per-project installs are unaffected — the guard is off there,
+  and they still work in non-git projects.
+- `tests/global.test.sh`: sandboxed (fake `HOME`) coverage of the global wiring,
+  absolute commands, the git-only write guard, cwd resolution (including
+  subdir → repo root), the managed protocol block, the global ignore,
+  idempotency on re-run, and `--global --check`.
+
+### Changed
+- `install.sh --check` reports global scope when passed `--global`.
+- `--global` and `--local` are mutually exclusive (explicit error).
+
 ## 0.5.0 — 2026-06-25
 
 Robustness pass driven by reproducing realistic "antithetical usage" failures:

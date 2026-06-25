@@ -29,32 +29,49 @@ KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 LOCAL=0
 CHECK=0
+GLOBAL=0
 TARGET=""
 for arg in "$@"; do
   case "$arg" in
     --local) LOCAL=1 ;;
     --check) CHECK=1 ;;
+    --global) GLOBAL=1 ;;
     -*) echo "error: unknown flag: $arg" >&2; exit 1 ;;
     *) TARGET="$arg" ;;
   esac
 done
 
-if [[ -z "${TARGET}" ]]; then
-  echo "usage: ./install.sh [--local] [--check] /path/to/target/project" >&2
-  exit 1
+if [[ "${GLOBAL}" -eq 1 && "${LOCAL}" -eq 1 ]]; then
+  echo "error: --global and --local are mutually exclusive" >&2; exit 1
 fi
-if [[ ! -d "${TARGET}" ]]; then
-  echo "error: target directory does not exist: ${TARGET}" >&2
-  exit 1
-fi
-TARGET="$(cd "${TARGET}" && pwd)"
 
-HOOKS_DIR="${TARGET}/.claude/hooks"
-MEM_DIR="${TARGET}/memory"
-SETTINGS="${TARGET}/.claude/settings.json"
-STATE="${HOOKS_DIR}/.agent-memory-kit.json"   # install state: version + managed hooks
+# --global installs once into ~/.claude and needs no target; every other mode
+# operates on a target project directory.
+if [[ "${GLOBAL}" -eq 0 ]]; then
+  if [[ -z "${TARGET}" ]]; then
+    echo "usage: ./install.sh [--local|--global] [--check] [/path/to/target/project]" >&2
+    exit 1
+  fi
+  if [[ ! -d "${TARGET}" ]]; then
+    echo "error: target directory does not exist: ${TARGET}" >&2
+    exit 1
+  fi
+  TARGET="$(cd "${TARGET}" && pwd)"
+fi
+
 KIT_VERSION="$(cat "${KIT_DIR}/VERSION" 2>/dev/null || echo "unknown")"
 HOOKS=(checkpoint.sh recall.sh memory-metrics.sh mem guard-archive.sh)
+
+if [[ "${GLOBAL}" -eq 1 ]]; then
+  HOOKS_DIR="${HOME}/.claude/hooks"
+  SETTINGS="${HOME}/.claude/settings.json"
+  MEM_DIR=""                                    # no per-project memory in global mode
+else
+  HOOKS_DIR="${TARGET}/.claude/hooks"
+  MEM_DIR="${TARGET}/memory"
+  SETTINGS="${TARGET}/.claude/settings.json"
+fi
+STATE="${HOOKS_DIR}/.agent-memory-kit.json"     # install state: version + managed hooks
 
 state_version() { # echo the version recorded in the target's state file, else empty
   [[ -f "${STATE}" ]] || { echo ""; return; }
@@ -64,12 +81,197 @@ state_version() { # echo the version recorded in the target's state file, else e
 # --check: report installed vs available and exit, mutating nothing.
 if [[ "${CHECK}" -eq 1 ]]; then
   installed="$(state_version)"; [[ -z "${installed}" ]] && installed="(not installed)"
-  echo "agent-memory-kit: installed=${installed}  available=${KIT_VERSION}  (${TARGET})"
+  loc="${TARGET}"; rerun="./install.sh ${TARGET}"
+  if [[ "${GLOBAL}" -eq 1 ]]; then loc="global (${HOOKS_DIR})"; rerun="./install.sh --global"; fi
+  echo "agent-memory-kit: installed=${installed}  available=${KIT_VERSION}  (${loc})"
   if [[ "${installed}" == "${KIT_VERSION}" ]]; then
     echo "up to date"
   else
-    echo "update available — re-run: ./install.sh ${TARGET}"
+    echo "update available — re-run: ${rerun}"
   fi
+  exit 0
+fi
+
+# --- Global mode: one install in ~/.claude serves every project --------------
+# Hooks resolve the project from the session's cwd, so a single global install
+# covers every existing project, every new repo, and every worktree with no
+# per-project setup. Memory stays LOCAL: the volatile tier is git-ignored
+# globally and nothing is committed. Non-git dirs are skipped, so memory/ is
+# never created in arbitrary places.
+if [[ "${GLOBAL}" -eq 1 ]]; then
+  mkdir -p "${HOOKS_DIR}"
+  OLD_VERSION="$(state_version)"
+
+  for h in "${HOOKS[@]}"; do
+    cp "${KIT_DIR}/hooks/${h}" "${HOOKS_DIR}/${h}"; chmod +x "${HOOKS_DIR}/${h}"
+    echo "installed: ${HOOKS_DIR}/${h}"
+  done
+
+  # Prune hooks a prior version placed but this one no longer ships.
+  REMOVED="$(python3 - "${STATE}" "${HOOKS_DIR}" "${HOOKS[@]}" <<'PY'
+import json, os, sys
+state_path, hooks_dir, current = sys.argv[1], sys.argv[2], set(sys.argv[3:])
+old = []
+if os.path.exists(state_path):
+    try: old = json.load(open(state_path)).get("hooks", [])
+    except Exception: old = []
+removed = [h for h in old if h not in current]
+for h in removed:
+    p = os.path.join(hooks_dir, h)
+    if os.path.isfile(p): os.remove(p)
+print(" ".join(removed))
+PY
+)"
+  [[ -n "${REMOVED}" ]] && echo "pruned removed hooks: ${REMOVED}"
+
+  # Global config: confine writes to git work trees and point the status line at
+  # the absolute metrics hook. Never clobber an edited one.
+  GCFG="${HOOKS_DIR}/checkpoint.config.sh"
+  if [[ ! -f "${GCFG}" ]]; then
+    cat > "${GCFG}" <<EOF
+# Global agent-memory-kit config (install.sh --global). Applies wherever a
+# project has no adjacent config of its own. A per-project install takes
+# precedence via its own .claude/hooks/checkpoint.config.sh.
+CHECKPOINT_REQUIRE_GIT=1
+CHECKPOINT_STATE_CMD='"${HOOKS_DIR}/memory-metrics.sh"'
+EOF
+    echo "installed: ${GCFG}  (global; edit to taste)"
+  else
+    echo "kept existing: ${GCFG}"
+  fi
+
+  # Wire ~/.claude/settings.json with ABSOLUTE hook commands (idempotent merge).
+  python3 - "${KIT_DIR}/templates/settings.snippet.json" "${SETTINGS}" "${HOOKS_DIR}" "${REMOVED}" <<'PY'
+import json, sys, os, shlex
+snippet_path, settings_path, hooks_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+removed_hooks = sys.argv[4].split() if len(sys.argv) > 4 and sys.argv[4].strip() else []
+snippet = json.load(open(snippet_path))
+def strip(o):
+    if isinstance(o, dict): return {k: strip(v) for k, v in o.items() if not k.startswith("_")}
+    if isinstance(o, list): return [strip(v) for v in o]
+    return o
+prefix = hooks_dir.rstrip("/") + "/"
+REL = ".claude/hooks/"
+def absolutize(cmd):
+    # Rewrite each .claude/hooks/<x> token to an absolute path, shell-quoted so a
+    # home path containing spaces or metacharacters can't break the command line
+    # Claude Code executes.
+    out = []
+    for tok in cmd.split():
+        out.append(shlex.quote(prefix + tok[len(REL):]) if tok.startswith(REL) else tok)
+    return " ".join(out)
+desired = strip(snippet).get("hooks", {})
+for ev, groups in desired.items():
+    for g in groups:
+        for h in g.get("hooks", []):
+            if "command" in h: h["command"] = absolutize(h["command"])
+settings = {}
+if os.path.exists(settings_path):
+    t = open(settings_path).read().strip()
+    settings = json.loads(t) if t else {}
+hooks = settings.setdefault("hooks", {})
+def sig(g): return (g.get("matcher", ""), tuple(sorted(h.get("command", "") for h in g.get("hooks", []))))
+added = 0
+for ev, groups in desired.items():
+    tgt = hooks.setdefault(ev, [])
+    existing = {sig(g) for g in tgt}
+    for g in groups:
+        if sig(g) not in existing:
+            tgt.append(g); existing.add(sig(g)); added += 1
+pruned = 0
+if removed_hooks:
+    def refs_removed(g):
+        for h in g.get("hooks", []):
+            first = (h.get("command", "").split() or [""])[0]
+            if os.path.basename(first) in removed_hooks: return True
+        return False
+    for ev in list(hooks.keys()):
+        before = len(hooks[ev]); hooks[ev] = [g for g in hooks[ev] if not refs_removed(g)]
+        pruned += before - len(hooks[ev])
+        if not hooks[ev]: del hooks[ev]
+os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+json.dump(settings, open(settings_path, "w"), indent=2); open(settings_path, "a").write("\n")
+print("settings: wired %d new hook group(s)%s (%s)" % (added, (", pruned %d stale" % pruned) if pruned else "", settings_path))
+PY
+
+  # Memory protocol into ~/.claude/CLAUDE.md as an idempotent, marked block, with
+  # absolute hook paths so any project can run the tools without a local install.
+  CLAUDE_MD="${HOME}/.claude/CLAUDE.md"
+  MB="<!-- agent-memory-kit:begin (managed block; edits inside may be overwritten) -->"
+  ME="<!-- agent-memory-kit:end -->"
+  # Escape the path for the sed REPLACEMENT side (&, |, \ are special there), and
+  # wrap each tool path in quotes so a spaced home path still runs.
+  ESC="$(printf '%s' "${HOOKS_DIR}" | sed -e 's/[&|\\]/\\&/g')"
+  if [[ -e "${CLAUDE_MD}" && ! -w "${CLAUDE_MD}" ]]; then
+    echo "WARNING: ${CLAUDE_MD} is not writable; skipped protocol — add it by hand." >&2
+  elif grep -qF "agent-memory-kit:begin" "${CLAUDE_MD}" 2>/dev/null; then
+    echo "protocol already present in ${CLAUDE_MD}"
+  elif {
+      printf '\n%s\n' "${MB}"
+      sed '1,/-->/d' "${KIT_DIR}/templates/CLAUDE.protocol.md" \
+        | sed -e 's|\.claude/hooks/mem|"'"${ESC}"'/mem"|g' \
+              -e 's|\.claude/hooks/recall.sh|"'"${ESC}"'/recall.sh"|g' \
+              -e 's|\.claude/hooks/checkpoint.sh|"'"${ESC}"'/checkpoint.sh"|g' \
+              -e 's|\[your status command\]|git status --short \&\& git log --oneline -5|'
+      printf '%s\n' "${ME}"
+    } >> "${CLAUDE_MD}"; then
+    echo "appended memory protocol to ${CLAUDE_MD}  (managed block)"
+  else
+    echo "WARNING: could not write protocol to ${CLAUDE_MD} — add it by hand." >&2
+  fi
+
+  # Keep the volatile tier out of git everywhere (memory stays local; the global
+  # install commits nothing). Uses git's default global ignore file.
+  # Honor an existing core.excludesFile (else git ignores our line everywhere it
+  # isn't); fall back to git's default global ignore when none is configured.
+  GI="$(git config --global core.excludesFile 2>/dev/null || true)"
+  if [[ -n "${GI}" ]]; then GI="${GI/#\~\//${HOME}/}"; else GI="${XDG_CONFIG_HOME:-${HOME}/.config}/git/ignore"; fi
+  mkdir -p "$(dirname "${GI}")"
+  if ! grep -qxF 'memory/working-set*.md' "${GI}" 2>/dev/null; then
+    [[ -s "${GI}" && -n "$(tail -c1 "${GI}" 2>/dev/null)" ]] && printf '\n' >> "${GI}"
+    printf '%s\n' 'memory/working-set*.md' >> "${GI}"
+    echo "global git-ignore: memory/working-set*.md -> ${GI}"
+  else
+    echo "global git-ignore already excludes memory/working-set*.md"
+  fi
+
+  python3 - "${STATE}" "${KIT_VERSION}" "${HOOKS[@]}" <<'PY'
+import json, sys
+json.dump({"version": sys.argv[2], "hooks": list(sys.argv[3:]), "scope": "global"},
+          open(sys.argv[1], "w"), indent=2)
+open(sys.argv[1], "a").write("\n")
+PY
+
+  # Verify the real (cwd-based, require-git) path in a throwaway git repo.
+  VTMP="$(mktemp -d)"; ( cd "${VTMP}" && git init -q )
+  if ( cd "${VTMP}" && CHECKPOINT_FORCE=1 CLAUDE_CODE_SESSION_ID="" MEM_SESSION_ID="" "${HOOKS_DIR}/checkpoint.sh" >/dev/null 2>&1 ) \
+     && grep -qE '<!-- checkpoint [0-9]{4}-' "${VTMP}/memory/working-set.md" 2>/dev/null; then
+    echo "verified: global hook resolves the project from cwd and writes its memory/"
+  else
+    echo "WARNING: global hook verify failed; check ${HOOKS_DIR}/checkpoint.sh" >&2
+  fi
+  rm -rf "${VTMP}"
+
+  if [[ -z "${OLD_VERSION}" ]]; then echo "installed: agent-memory-kit ${KIT_VERSION} (global)"
+  elif [[ "${OLD_VERSION}" == "${KIT_VERSION}" ]]; then echo "reinstalled: agent-memory-kit ${KIT_VERSION} (global)"
+  else echo "updated: agent-memory-kit ${OLD_VERSION} -> ${KIT_VERSION} (global)"; fi
+
+  cat <<EOF
+
+Global install complete. Every session in any git project now gets the memory
+hooks and protocol automatically — existing projects, new repos, and worktrees —
+with no per-project setup. Memory stays LOCAL: working sets are git-ignored
+globally and nothing (ledger/archive) is committed unless you choose to in a
+specific repo. Non-git directories (and \$HOME itself) are skipped, so memory/ is
+never created in arbitrary places.
+
+  hooks:    ${HOOKS_DIR}
+  settings: ${SETTINGS}
+  protocol: ${CLAUDE_MD} (managed block)
+
+Note: do not also run a per-project install in the same repo — both wirings would
+fire the hooks each event (harmless but redundant). Pick one.
+EOF
   exit 0
 fi
 
