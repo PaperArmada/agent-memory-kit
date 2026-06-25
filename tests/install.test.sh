@@ -79,24 +79,25 @@ T5="${WORK}/t5"; mkdir -p "${T5}"
 ( cd "${T5}" && git init -q )
 bash "${INSTALL}" "${T5}" >/dev/null 2>&1
 check "working-set.md git-ignored"          "git -C '${T5}' check-ignore -q memory/working-set.md"
+check "per-session working-set git-ignored" "git -C '${T5}' check-ignore -q memory/working-set.aaaaaaaa.md"
 check "ledger.md NOT git-ignored"           "! git -C '${T5}' check-ignore -q memory/ledger.md"
 check "archive.md NOT git-ignored"          "! git -C '${T5}' check-ignore -q memory/archive.md"
 check "archive set to union merge"          "grep -qxF 'memory/archive.md merge=union' '${T5}/.gitattributes'"
 bash "${INSTALL}" "${T5}" >/dev/null 2>&1
-check "gitignore entry not duplicated"      "[ \"\$(grep -cxF 'memory/working-set.md' '${T5}/.gitignore')\" = '1' ]"
+check "gitignore entry not duplicated"      "[ \"\$(grep -cxF 'memory/working-set*.md' '${T5}/.gitignore')\" = '1' ]"
 check "gitattributes entry not duplicated"  "[ \"\$(grep -cxF 'memory/archive.md merge=union' '${T5}/.gitattributes')\" = '1' ]"
 
 echo "== test 6: --local does NOT add the shared-mode git treatment =="
 # In --local mode all of memory/ is excluded personally; the committed .gitignore
 # / .gitattributes should not gain the shared-mode entries.
-check "no committed .gitignore working-set entry" "[ ! -f '${T2}/.gitignore' ] || ! grep -qxF 'memory/working-set.md' '${T2}/.gitignore'"
+check "no committed .gitignore working-set entry" "[ ! -f '${T2}/.gitignore' ] || ! grep -q 'memory/working-set' '${T2}/.gitignore'"
 check "no committed union .gitattributes"          "[ ! -f '${T2}/.gitattributes' ] || ! grep -qxF 'memory/archive.md merge=union' '${T2}/.gitattributes'"
 
 echo "== test 7: default->--local warns about leftover shared-mode git config =="
 T7="${WORK}/t7"; mkdir -p "${T7}"; ( cd "${T7}" && git init -q )
 bash "${INSTALL}" "${T7}" >/dev/null 2>&1               # default adds .gitignore/.gitattributes
 OUT7="$(bash "${INSTALL}" --local "${T7}" 2>&1)"        # then switch to --local
-check "shared .gitignore entry still present"  "grep -qxF 'memory/working-set.md' '${T7}/.gitignore'"
+check "shared .gitignore entry still present"  "grep -qxF 'memory/working-set*.md' '${T7}/.gitignore'"
 check "--local warns about leftover shared config" "printf '%s' \"\${OUT7}\" | grep -q 'shared-mode git config'"
 
 echo "== test 8: pre-tracked working-set is detected (ignore would be inert) =="
@@ -150,6 +151,18 @@ bash "${INSTALL}" "${T12}" >/dev/null 2>&1
 check "stale hook file removed"            "[ ! -f '${T12}/.claude/hooks/oldhook.sh' ]"
 check "stale settings group removed"       "! grep -q 'oldhook.sh' '${T12}/.claude/settings.json'"
 check "current hooks survive prune"        "[ -f '${T12}/.claude/hooks/checkpoint.sh' ] && [ -f '${T12}/.claude/hooks/mem' ]"
+
+echo "== test 13: config default leaves CHECKPOINT_FILE unset (per-session works) =="
+# A fresh config must NOT pin CHECKPOINT_FILE, or the hook would skip mem ws-path
+# and write one shared working set for every session (defeating isolation).
+CFG13="${T1}/.claude/hooks/checkpoint.config.sh"
+check "fresh config does not pin CHECKPOINT_FILE" "! grep -qE '^[[:space:]]*(export[[:space:]]+)?CHECKPOINT_FILE=' '${CFG13}'"
+# An existing config that DOES pin it triggers a warning on re-install. Use an
+# ABSOLUTE path under the temp project so the sourced value can't redirect any
+# write outside the sandbox if something sources the config.
+printf 'CHECKPOINT_FILE="%s/memory/ws-pinned.md"\n' "${T1}" >> "${CFG13}"
+OUT13="$(bash "${INSTALL}" "${T1}" 2>&1)"
+check "re-install warns on pinned CHECKPOINT_FILE"  "printf '%s' \"\${OUT13}\" | grep -q 'disables per-session isolation'"
 
 echo
 echo "passed: ${PASS}  failed: ${FAIL}"

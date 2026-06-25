@@ -36,7 +36,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- Resolve configuration ---------------------------------------------------
 PROJECT_DIR="${CHECKPOINT_PROJECT_DIR:-$(git -C "${SCRIPT_DIR}" rev-parse --show-toplevel 2>/dev/null || pwd)}"
-CHECKPOINT_FILE="${CHECKPOINT_FILE:-${PROJECT_DIR}/memory/working-set.md}"
 STATE_CMD="${CHECKPOINT_STATE_CMD:-}"
 STATE_MAX_LINES="${CHECKPOINT_STATE_MAX_LINES:-12}"
 RATE_SECONDS="${CHECKPOINT_RATE_SECONDS:-10}"
@@ -44,7 +43,7 @@ RATE_SECONDS="${CHECKPOINT_RATE_SECONDS:-10}"
 # --- Rate limiting (per project) ---------------------------------------------
 # CHECKPOINT_FORCE=1 bypasses the limit entirely — used by the PreCompact wiring,
 # where skipping the write would defeat the whole purpose.
-KEY=$(printf '%s' "${PROJECT_DIR}" | cksum | cut -d' ' -f1)
+KEY=$(printf '%s' "${PROJECT_DIR}|${CLAUDE_CODE_SESSION_ID:-}" | cksum | cut -d' ' -f1)
 RATE_FILE="${TMPDIR:-/tmp}/precompact-checkpoint-${KEY}.last"
 NOW=$(date +%s)
 if [[ "${CHECKPOINT_FORCE:-0}" != "1" && -f "${RATE_FILE}" ]]; then
@@ -54,6 +53,17 @@ if [[ "${CHECKPOINT_FORCE:-0}" != "1" && -f "${RATE_FILE}" ]]; then
   fi
 fi
 echo "${NOW}" > "${RATE_FILE}"
+
+# --- Resolve the working-set file (only now that we've committed to writing) --
+# Per-session path via `mem` (single source of truth for the session-key logic),
+# so two efforts in one checkout never share a file. An explicit CHECKPOINT_FILE
+# override wins; outside a session `mem` returns the legacy memory/working-set.md,
+# so behavior is unchanged in non-session contexts. Done after the rate gate so
+# skipped fires (the common case) cost nothing.
+if [[ -z "${CHECKPOINT_FILE:-}" ]]; then
+  CHECKPOINT_FILE="$(CHECKPOINT_PROJECT_DIR="${PROJECT_DIR}" python3 "${SCRIPT_DIR}/mem" ws-path 2>/dev/null)"
+  [[ -z "${CHECKPOINT_FILE}" ]] && CHECKPOINT_FILE="${PROJECT_DIR}/memory/working-set.md"
+fi
 
 # --- Gather structural state -------------------------------------------------
 TIMESTAMP=$(date -u '+%Y-%m-%dT%H:%M:%SZ')

@@ -9,7 +9,12 @@
 
 # Tier-1 working-set file: the hook writes its auto block at the top, the agent
 # overwrites the "Now" section below it. This is what the protocol reads first.
-CHECKPOINT_FILE="${CHECKPOINT_PROJECT_DIR:-.}/memory/working-set.md"
+#
+# Leave this UNSET (the default). When unset, the hook resolves a PER-SESSION
+# file via `mem ws-path` (memory/working-set.<session-id>.md), so two sessions in
+# one checkout never overwrite each other's "Now". Setting it pins ONE fixed file
+# for every session and disables that isolation — only do so deliberately.
+# CHECKPOINT_FILE="${CHECKPOINT_PROJECT_DIR:-.}/memory/working-set.md"
 
 # Project-specific structural state. stdout is embedded verbatim (truncated to
 # CHECKPOINT_STATE_MAX_LINES). Keep it deterministic and fast: no LLM, no network

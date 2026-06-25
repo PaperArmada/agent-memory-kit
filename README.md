@@ -38,7 +38,7 @@ precompact-checkpoint-kit/
 │   ├── checkpoint.sh                   # structural auto block (the write side)
 │   ├── recall.sh                       # flat-file output gate (no-indexer fallback)
 │   ├── memory-metrics.sh               # forget-gate pressure signal for the auto block
-│   ├── mem                             # forget-gate tools: gc-scan + append-only demote
+│   ├── mem                             # per-session working set (ws-path/ws-latest/ws-gc) + forget gate (gc-scan/demote)
 │   ├── guard-archive.sh                # PreToolUse guard: blocks direct archive edits
 │   └── checkpoint.config.example.sh    # the knobs, documented
 └── templates/
@@ -57,7 +57,7 @@ precompact-checkpoint-kit/
 ./install.sh --local /path/to/your/project    # personal setup in a shared repo
 ```
 
-The installer copies the hooks and a config into `<project>/.claude/hooks/`, seeds `<project>/memory/` with the three tier files (never clobbering existing ones), **wires the hooks into `<project>/.claude/settings.json`** by idempotent deep-merge (never duplicates a hook, never touches unrelated settings), and **verifies the write path** by firing the hook once and confirming the auto block landed. In a git repo (default mode) it also **splits the tiers' git treatment**: `memory/working-set.md` is git-ignored (per-effort and volatile), while `memory/ledger.md` and `memory/archive.md` stay committed and shared, with `archive.md` set to `union` merge so parallel branches' appends combine without conflict. See [Parallel development](#parallel-development-worktrees).
+The installer copies the hooks and a config into `<project>/.claude/hooks/`, seeds `<project>/memory/` with the three tier files (never clobbering existing ones), **wires the hooks into `<project>/.claude/settings.json`** by idempotent deep-merge (never duplicates a hook, never touches unrelated settings), and **verifies the write path** by firing the hook once and confirming the auto block landed. In a git repo (default mode) it also **splits the tiers' git treatment**: `memory/working-set*.md` is git-ignored (per-session and volatile), while `memory/ledger.md` and `memory/archive.md` stay committed and shared, with `archive.md` set to `union` merge so parallel branches' appends combine without conflict. See [Parallel development](#parallel-development-worktrees).
 
 That leaves one manual step in the default mode: paste `templates/CLAUDE.protocol.md` into `<project>/CLAUDE.md` and fill in your status command. The placement is left to you because the protocol belongs in the file the agent loads, and in a shared repo that's a judgment call.
 
@@ -71,7 +71,7 @@ CHECKPOINT_PROJECT_DIR=/path/to/your/project /path/to/your/project/.claude/hooks
 # top of memory/working-set.md.
 ```
 
-The installer's own behavior (merge, dedupe, idempotency, `--local` artifacts, worktree exclude, tier git treatment) is covered by `tests/install.test.sh`.
+The installer's own behavior (merge, dedupe, idempotency, `--local` artifacts, worktree exclude, tier git treatment) is covered by `tests/install.test.sh`. `tests/mem.test.sh` covers the per-session working set and the forget gate. `tests/robustness.sh` reproduces antithetical-usage failures (same-directory concurrency, ledger garbage) against the installed kit and reports SAFE/UNSAFE per scenario (`--strict` to gate).
 
 ## Parallel development (worktrees)
 
@@ -81,7 +81,7 @@ design:
 
 | Tier | Scope | Git treatment (default mode) |
 |---|---|---|
-| working-set | the *effort* | git-ignored; each worktree/branch has its own, never merged |
+| working-set | the *session* | git-ignored; each session has its own `working-set.<id>.md`, never merged |
 | ledger + archive | the *project* | committed and shared; merged across branches |
 
 The pattern is **one git worktree per feature**:
@@ -90,11 +90,14 @@ The pattern is **one git worktree per feature**:
 git worktree add ../proj-featureX -b featureX
 ```
 
-Each worktree is a separate directory, so each gets its **own** `working-set.md`
-(its own "Now"), no collision, no locking needed. (A fresh worktree starts
-*without* the file: it's git-ignored, so it doesn't travel; the checkpoint hook
-recreates it on first fire. This is why the hooks must be committed in shared
-mode, so a new worktree has them.) The shared `ledger.md` and `archive.md` travel
+Each worktree is a separate directory, and on top of that the working set is
+**per session** (`working-set.<id>.md`, keyed by `CLAUDE_CODE_SESSION_ID`), so
+efforts don't collide even when two sessions share one checkout, no locking
+needed. (Working sets are git-ignored, so they don't travel; the checkpoint hook
+and `mem ws-path` create a session's file on first use. This is why the hooks
+must be committed in shared mode, so a new worktree has them.) `mem ws-latest`
+points a resume at the most recent; `mem ws-gc` prunes stale ones. The shared
+`ledger.md` and `archive.md` travel
 on the branch and merge when it does:
 
 - **archive** is append-only and set to `merge=union`, so entries added on
@@ -110,11 +113,38 @@ commit `.gitignore`, `.gitattributes`, `memory/ledger.md`, and
 and `--local` leaves the prior mode's git settings in place; the installer warns
 when it detects that, but does not auto-undo them.
 
-Git is the concurrency control. The one unsafe case is **two sessions in the same
-directory** (two terminals, one path): they race on the same files with no lock.
-Use a worktree per effort instead. `--local` mode is a different axis, it keeps
+Git is the concurrency control for the shared tiers. **Two sessions in the same
+directory** (two terminals, one path) no longer clobber their working sets, those
+are per-session, but they do still share `ledger.md`/`archive.md` in place, so a
+concurrent demote/promote can race (last-write-wins). A worktree per effort avoids
+even that. `--local` mode is a different axis, it keeps
 *all* of memory personal and uncommitted (for using the kit in a team repo that
 hasn't adopted it), so it does not share ledger/archive across efforts.
+
+## Updating
+
+The kit is vendored, `install.sh` copies files into your project, so to update you pull a newer kit and re-run the installer:
+
+```bash
+cd /path/to/agent-memory-kit && git pull        # or: git checkout v0.4.0
+./install.sh /path/to/your/project              # re-run; idempotent
+```
+
+Re-running is safe:
+- **hooks** are overwritten with the new versions; **settings** are re-merged (new groups added, none duplicated);
+- your `checkpoint.config.sh` and `memory/` files are **never touched**;
+- hooks a previous version installed but the current one **no longer ships are removed**, along with their settings wiring (manifest-driven, so only kit-managed files are pruned, never your own);
+- the installed version is recorded in `.claude/hooks/.agent-memory-kit.json`, and the installer prints the delta (`updated: 0.3.0 -> 0.4.0`).
+
+Check a project without changing anything:
+
+```bash
+./install.sh --check /path/to/your/project
+# agent-memory-kit: installed=0.3.0  available=0.4.0  (...)
+# update available — re-run: ./install.sh /path/to/your/project
+```
+
+Releases are tagged (`vMAJOR.MINOR.PATCH`) with notes in [CHANGELOG.md](CHANGELOG.md). Pin to a tag for controlled updates, or watch the repo's releases for the "what changed" feed. There is no auto-update: you pull and re-run when you choose.
 
 ## Configure
 
@@ -150,14 +180,14 @@ The hook guarantees the structure is fresh; you and the agent (per the protocol)
 
 1. **Every meaningful step:** overwrite the working set's "Now" section. This is what bounds crash loss, so write often.
 2. **At decision/task boundaries:** promote durable facts to the ledger (input gate).
-3. **When the auto block reports ledger pressure:** run `mem gc-scan` to find entries whose Refs no longer exist, then `mem demote <id>` to move stale ones to the archive (append-only). A `PreToolUse` guard blocks any direct edit to `archive.md`, so the immutable record can't be corrupted even by mistake.
+3. **When the auto block reports ledger pressure:** run `mem gc-scan` to list demote candidates, entries whose file Refs are gone, ones marked `superseded`, or stale ones (no live code anchor, past the staleness window, cross-linked by nothing); `invariant` and active `open-question` entries are never nominated. Then `mem demote <id>` moves a candidate to the archive (append-only). A `PreToolUse` guard blocks any direct edit to `archive.md`, so the immutable record can't be corrupted even by mistake.
 4. **On resume:** read the auto block, then the working set, then relevant ledger entries. Query the archive only for a specific lost detail.
 
 ## Requirements
 
 `bash` (3.2+), `git`, `python3`, `awk`, and standard coreutils. No packages to install.
 
-> Status: **v0.1.0**, pre-1.0 (SemVer): layout, protocol, and tool surface may change between minor versions. The mechanical layer is execution-verified on Linux; the semantic layer has a baseline eval suite in [`evals/BASELINE.md`](evals/BASELINE.md).
+> Status: **v0.5.0**, pre-1.0 (SemVer): layout, protocol, and tool surface may change between minor versions. The mechanical layer is execution-verified on Linux; the semantic layer has a baseline eval suite in [`evals/BASELINE.md`](evals/BASELINE.md).
 
 ### Portability (macOS / BSD): statically reviewed, not yet run
 

@@ -18,7 +18,7 @@
 #             since that placement is a judgment call.
 #
 #   Default (shared) mode also splits the git treatment of the memory tiers:
-#   memory/working-set.md is git-ignored (per-effort and volatile), while
+#   memory/working-set*.md is git-ignored (per-session and volatile), while
 #   ledger.md and archive.md stay committed and shared. archive.md is given a
 #   `union` merge driver so its append-only entries from parallel branches merge
 #   without conflicts. See "Parallel development" in README.md.
@@ -109,6 +109,14 @@ if [[ ! -f "${HOOKS_DIR}/checkpoint.config.sh" ]]; then
   echo "installed: ${HOOKS_DIR}/checkpoint.config.sh  (edit this)"
 else
   echo "kept existing: ${HOOKS_DIR}/checkpoint.config.sh"
+  # An active CHECKPOINT_FILE= line pins one fixed working set and disables the
+  # per-session isolation (pre-0.5.0 configs set it). Warn; do not auto-edit a
+  # config the user may have customized.
+  if grep -qE '^[[:space:]]*(export[[:space:]]+)?CHECKPOINT_FILE=' "${HOOKS_DIR}/checkpoint.config.sh"; then
+    echo "WARNING: ${HOOKS_DIR}/checkpoint.config.sh sets CHECKPOINT_FILE, which pins one" >&2
+    echo "         working set for all sessions and disables per-session isolation (new in" >&2
+    echo "         0.5.0). Comment that line out to let sessions get separate working sets." >&2
+  fi
 fi
 
 # --- Memory tier seeds (never clobber real memory) ---------------------------
@@ -237,7 +245,7 @@ if [[ "${LOCAL}" -eq 1 ]]; then
 
   # Reverse-mode check: shared-mode git config from a prior default install leaks
   # the kit into the committed tree; --local users usually do not want that.
-  if grep -qxF "memory/working-set.md" "${TARGET}/.gitignore" 2>/dev/null \
+  if grep -qE '^memory/working-set\*?\.md$' "${TARGET}/.gitignore" 2>/dev/null \
      || grep -qxF "memory/archive.md merge=union" "${TARGET}/.gitattributes" 2>/dev/null; then
     echo "WARNING: shared-mode git config (.gitignore / .gitattributes from a prior default" >&2
     echo "         install) is present in the tree. --local keeps memory personal; remove" >&2
@@ -246,9 +254,9 @@ if [[ "${LOCAL}" -eq 1 ]]; then
 fi
 
 # --- Shared mode: split the git treatment of the memory tiers ----------------
-# working-set.md is volatile and per-effort (each worktree/branch/session has its
-# own "Now"); committing it would collide across parallel efforts and churn merge
-# diffs, so it is git-ignored. ledger.md and archive.md are shared project memory
+# working-set*.md is volatile and per-session (each session writes its own "Now"
+# file, keyed by session id, so concurrent efforts never collide); committing it
+# would churn merge diffs, so it is git-ignored. ledger.md and archive.md are shared
 # and stay committed. The archive is append-only, so a `union` merge driver
 # integrates entries from parallel branches without conflicts (it keeps both
 # sides) — that is what lets parallel development merge cleanly. ledger.md keeps
@@ -263,10 +271,10 @@ if [[ "${LOCAL}" -eq 0 ]]; then
       printf '%s\n' "${line}" >> "${f}"
       return 0
     }
-    if add_line "${TARGET}/.gitignore" "memory/working-set.md"; then
-      echo "git-ignored (shared): memory/working-set.md  (per-effort)"
+    if add_line "${TARGET}/.gitignore" "memory/working-set*.md"; then
+      echo "git-ignored (shared): memory/working-set*.md  (per-session, volatile)"
     else
-      echo "git-ignore already excludes memory/working-set.md"
+      echo "git-ignore already excludes memory/working-set*.md"
     fi
     if add_line "${TARGET}/.gitattributes" "memory/archive.md merge=union"; then
       echo "git-attribute (shared): memory/archive.md merge=union  (append-only entries merge without git conflicts)"
@@ -297,8 +305,12 @@ if [[ "${LOCAL}" -eq 0 ]]; then
 fi
 
 # --- Verify the write path once, so we don't just assume it works ------------
-if CHECKPOINT_PROJECT_DIR="${TARGET}" CHECKPOINT_FORCE=1 "${HOOKS_DIR}/checkpoint.sh" >/dev/null 2>&1 \
-   && grep -q "Checkpoint (auto)" "${MEM_DIR}/working-set.md"; then
+# Pin the verify to the legacy (no-session) file and require a real timestamped
+# marker, not the seed template's "(none yet)" placeholder, so this genuinely
+# proves the hook wrote — even when install runs inside a Claude session (which
+# would otherwise route the write to a per-session working-set.<id>.md).
+if CHECKPOINT_PROJECT_DIR="${TARGET}" CHECKPOINT_FORCE=1 CHECKPOINT_FILE="" CLAUDE_CODE_SESSION_ID="" MEM_SESSION_ID="" "${HOOKS_DIR}/checkpoint.sh" >/dev/null 2>&1 \
+   && grep -qE '<!-- checkpoint [0-9]{4}-' "${MEM_DIR}/working-set.md"; then
   echo "verified: checkpoint hook wrote the auto block to ${MEM_DIR}/working-set.md"
 else
   echo "WARNING: checkpoint hook did not produce an auto block; check ${HOOKS_DIR}/checkpoint.sh manually" >&2
@@ -332,9 +344,9 @@ judgment call, so it isn't auto-applied):
   the protocol should stay personal, re-run with --local to put it in
   CLAUDE.local.md and git-exclude the tooling instead.
 
-Memory sharing: working-set.md is git-ignored (per-effort); ledger.md and
-archive.md are committed and shared (archive set to union-merge). For parallel
-features, use one git worktree per effort — see "Parallel development" in README.
+Memory sharing: working-set*.md is git-ignored (per-session, isolated even within
+one checkout); ledger.md and archive.md are committed and shared (archive set to
+union-merge). Worktrees still isolate cleanly — see "Parallel development" in README.
 
 Design rationale and the tier/gate model: see MEMORY-MODEL.md.
 EOF

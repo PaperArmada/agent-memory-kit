@@ -3,6 +3,54 @@
 All notable changes to the pre-compaction memory kit. Versioning is [SemVer](https://semver.org).
 Pre-1.0 (`0.y.z`): the layout, protocol, and tool surface may change between minor versions.
 
+## 0.5.0 — 2026-06-25
+
+Robustness pass driven by reproducing realistic "antithetical usage" failures:
+same-directory concurrency clobbering the working set, and ref-less garbage
+accumulating in the auto-loaded ledger unseen. Both are now hardened defaults,
+verified by deterministic reproductions, not process the user has to follow.
+
+### Added
+- **Per-session working set.** Each session writes its own
+  `memory/working-set.<id>.md`, keyed by `CLAUDE_CODE_SESSION_ID`, so two efforts
+  in one checkout no longer overwrite each other's "Now". The checkpoint hook and
+  `mem ws-path` derive the same path with no coordination; outside a session (id
+  unset) the legacy `memory/working-set.md` is used, so non-session behavior is
+  unchanged.
+- `mem ws-path` (this session's file, created on first use), `mem ws-latest` (the
+  most-recently-touched working set, for a resume to read), and `mem ws-gc`
+  (prune working-set files older than `WS_TTL_DAYS`, always keeping the latest and
+  the current session's).
+- **Forget gate now sees ref-less garbage.** `mem gc-scan` also nominates entries
+  marked `superseded:*` and "stale" ones (no live code anchor, older than
+  `LEDGER_STALE_DAYS` (30) by entry date, and cross-linked by no `[[id]]`).
+  `invariant` and active `open-question` entries are never nominated.
+- `tests/mem.test.sh`: per-session path derivation, `ws-latest`/`ws-gc`, and the
+  gc-scan nomination/protection rules (including that invariants and active
+  open-questions are protected).
+- `tests/robustness.sh`: reproduces same-directory clobber and ledger-garbage
+  against the *installed* kit and reports SAFE/UNSAFE per scenario (`--strict`
+  exits non-zero on any UNSAFE), plus positive controls (worktree isolation,
+  non-git project) and a measured parallel-branch ledger merge.
+
+### Changed
+- Default-mode install git-ignores `memory/working-set*.md` (the per-session glob)
+  rather than the single `memory/working-set.md`.
+- The example config no longer pins `CHECKPOINT_FILE`; left unset, the hook
+  resolves the per-session path via `mem ws-path`. **Upgraders:** a pre-0.5.0
+  `checkpoint.config.sh` still sets `CHECKPOINT_FILE`, which disables isolation;
+  re-running `install.sh` now warns when it detects this (it never edits your
+  config) — comment that line out to enable per-session working sets.
+- `memory-metrics.sh` ages the most-recent session working set (per-session files
+  share one directory). Accumulation of session files is observed on demand with
+  `mem ws-gc`, not nagged in the auto block every checkpoint.
+- Install's write-path verify is pinned to the legacy file and now requires a real
+  timestamped checkpoint marker (not the seed template's placeholder), so it can't
+  false-pass when the hook routes a write to a per-session file.
+- `templates/CLAUDE.protocol.md` directs the agent to its working set via
+  `mem ws-path` (write) and `mem ws-latest` (resume read), and documents the
+  broader gc-scan candidate rules and protections.
+
 ## 0.4.0 — 2026-06-23
 
 Update story for existing consumers: versioned, self-cleaning re-install.

@@ -10,7 +10,10 @@
 Three memory files complement the lossy compaction summary. Maintain them as a
 continuous discipline, not a chore at session end.
 
-- `memory/working-set.md` — what you're doing *right now*. Overwrite in place.
+- your **working set** — what you're doing *right now*. Overwrite in place. It is
+  **per-session**: get your file with `WS=$(.claude/hooks/mem ws-path)` and write
+  to `$WS`. Two concurrent sessions in one checkout get separate files, so they
+  never overwrite each other.
 - `memory/ledger.md` — durable decisions, dead-ends, invariants, open questions.
 - `memory/archive.md` (or the indexer) — cold store of demoted entries.
 
@@ -19,9 +22,11 @@ continuous discipline, not a chore at session end.
 Before any work:
 
 1. Run the status command and read it: `[your status command]`.
-2. Read `memory/working-set.md`. The **Checkpoint (auto)** block is the last
-   machine-written position (time, git, memory pressure); the **Now** section is
-   your last live state. Trust these over the summary if they disagree.
+2. Read the most recent working set: `cat "$(.claude/hooks/mem ws-latest)"`. The
+   **Checkpoint (auto)** block is the last machine-written position (time, git,
+   memory pressure); the **Now** section is the last live state. Trust these over
+   the summary if they disagree. (`ws-latest` may be a prior effort's file; write
+   your own with `mem ws-path`.)
 3. Skim `memory/ledger.md` for decisions and abandoned approaches relevant to the
    task. Do not reopen a dead-end recorded there. If the Now hypothesis flags any
    uncertainty about a choice, that is a recall trigger (see Recall below): query
@@ -33,8 +38,9 @@ Do not start work until this is done.
 
 ### While working (this is what bounds crash loss)
 
-- After each meaningful step, **overwrite** `memory/working-set.md` → Now: task,
-  live hypothesis, next step, blockers. Cheap and frequent. A mechanical failure
+- After each meaningful step, **overwrite** your working set (`$WS` from
+  `mem ws-path`) → Now: task, live hypothesis, next step, blockers. Cheap and
+  frequent. A mechanical failure
   (crashed tool, dropped network) loses only what happened since the last write,
   so write often.
 - When a decision crystallizes or you abandon an approach, **promote** it to
@@ -47,11 +53,13 @@ Do not start work until this is done.
 When the auto block reports ledger pressure (entry count over the soft max), run
 a forget-gate pass:
 
-1. Run `.claude/hooks/mem gc-scan`. It lists ledger entries whose file Refs no
-   longer exist on disk — the mechanical half of "is this stale?", done for you.
-2. For each candidate (plus any entry you judge superseded or no longer
-   load-bearing), demote it: `.claude/hooks/mem demote <id>`. That moves the
-   entry to `memory/archive.md`, appended verbatim, and drops it from the ledger.
+1. Run `.claude/hooks/mem gc-scan`. It lists demote candidates by mechanical
+   test: file Refs gone, status marked `superseded`, or stale (no live code
+   anchor, older than the staleness window, and cross-linked by nothing).
+   Invariants and active open-questions are never nominated — they are protected.
+2. For each candidate (plus any entry you judge no longer load-bearing), demote
+   it: `.claude/hooks/mem demote <id>`. That moves the entry to
+   `memory/archive.md`, appended verbatim, and drops it from the ledger.
 
 **Never edit `memory/archive.md` by hand** — it is an append-only, immutable
 record, and a hook blocks direct writes to it. `mem demote` is the only way to

@@ -1,23 +1,42 @@
 #!/usr/bin/env python3
 """mem — structured operations on the markdown memory tiers.
 
-The forget gate has two parts that must NOT be left to prose:
-  - a mechanical check ("does this entry's referenced code still exist?"), and
-  - a hard invariant ("the archive is append-only; never edit it").
+Two things must NOT be left to prose, so this tool owns them:
 
-This tool owns both, so the agent's judgment is the only thing left to it.
+  Forget gate
+    - a mechanical staleness check (refs gone? too old and unreferenced?
+      explicitly superseded?), and
+    - a hard invariant (the archive is append-only; never edit it).
+
+  Per-session working set
+    - each session writes its OWN working-set file so two efforts in one
+      checkout cannot silently overwrite each other. The session key comes from
+      CLAUDE_CODE_SESSION_ID (the same id the checkpoint hook resolves), so the
+      hook and the agent's commands agree on the path with no coordination.
 
 Commands:
-  mem gc-scan        List ledger entries whose file Refs no longer exist on disk
-                     (demote candidates). Advisory: you still decide.
+  mem ws-path        Print this session's working-set file (creating it from the
+                     template if absent). Where you WRITE your Now block.
+  mem ws-latest      Print the most-recently-touched working-set file. Where a
+                     fresh session READS to resume (may be a prior effort's).
+  mem ws-gc          Prune working-set files older than WS_TTL_DAYS (default 14),
+                     always keeping the latest and the current session's.
+  mem gc-scan        List ledger demote candidates: file Refs gone, OR explicitly
+                     superseded, OR stale (no live code anchor, older than
+                     LEDGER_STALE_DAYS and unreferenced). Invariants and active
+                     open-questions are never nominated. Advisory: you decide.
   mem demote <id>    Move a ledger entry to the archive. Appended VERBATIM;
-                     existing archive entries are never touched. Immutability
-                     is enforced here, structurally.
+                     existing archive entries are never touched. Immutability is
+                     enforced here, structurally.
   mem ls             List ledger entry ids and their Refs.
 
 Paths resolve under the project root (CHECKPOINT_PROJECT_DIR, else git root,
-else cwd). Override with LEDGER_FILE / ARCHIVE_FILE.
+else cwd). Override with LEDGER_FILE / ARCHIVE_FILE. Session id override:
+MEM_SESSION_ID (else CLAUDE_CODE_SESSION_ID). Today override (tests): MEM_NOW.
 """
+import datetime
+import glob
+import hashlib
 import os
 import re
 import subprocess
@@ -40,17 +59,111 @@ def project_root():
 ROOT = project_root()
 LEDGER = os.environ.get("LEDGER_FILE", os.path.join(ROOT, "memory/ledger.md"))
 ARCHIVE = os.environ.get("ARCHIVE_FILE", os.path.join(ROOT, "memory/archive.md"))
+STALE_DAYS = int(os.environ.get("LEDGER_STALE_DAYS", "30"))
+
+# Seed for a fresh per-session working set. Kept in sync with
+# templates/memory/working-set.md; the hook rewrites the auto block in place.
+SEED_WS = """# Working Set
+
+<!-- The checkpoint hook owns the auto block below. Do not hand-edit it. -->
+<!-- checkpoint (none yet) -->
+## Checkpoint (auto)
+
+(The hook writes time, git position, status output, and memory-pressure here.)
+
+<!-- Everything below is yours. Replace it in place each meaningful step. -->
+<!-- This tier is volatile and bounded: overwrite, do not append. Whatever is -->
+<!-- here is what a crash would preserve, so keep it current. -->
+
+## Now
+
+**Task:**
+**Live hypothesis:**
+**Next step:**
+**Blocked on:**
+
+<!-- When a decision crystallizes or an approach is abandoned, promote it to -->
+<!-- memory/ledger.md (input gate). Do not let durable facts live only here. -->
+"""
 
 
+# --- session-scoped working set ----------------------------------------------
+def session_key():
+    """Short, filename-safe key for this session, or None outside a session
+    (install verify, manual runs, tests) — in which case the legacy fixed
+    working-set.md name is used, preserving backward-compatible behavior."""
+    sid = (os.environ.get("MEM_SESSION_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip()
+    if not sid:
+        return None
+    m = re.match(r"[0-9a-fA-F]{8}", sid)
+    return m.group(0) if m else hashlib.sha1(sid.encode()).hexdigest()[:8]
+
+
+def ws_path():
+    key = session_key()
+    name = f"working-set.{key}.md" if key else "working-set.md"
+    return os.path.join(ROOT, "memory", name)
+
+
+def ws_glob():
+    return sorted(
+        glob.glob(os.path.join(ROOT, "memory", "working-set*.md")),
+        key=os.path.getmtime,
+        reverse=True,
+    )
+
+
+def cmd_ws_path():
+    p = ws_path()
+    if not os.path.exists(p):
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write(SEED_WS)
+    print(p)
+
+
+def cmd_ws_latest():
+    files = ws_glob()
+    if files:
+        print(files[0])
+    else:
+        cmd_ws_path()  # none yet: create and print this session's
+
+
+def cmd_ws_gc():
+    ttl_days = float(os.environ.get("WS_TTL_DAYS", "14"))
+    files = ws_glob()
+    if not files:
+        print("no working-set files")
+        return
+    keep = {os.path.abspath(files[0]), os.path.abspath(ws_path())}
+    now = datetime.datetime.now().timestamp()
+    removed = []
+    for p in files:
+        if os.path.abspath(p) in keep:
+            continue
+        age = (now - os.path.getmtime(p)) / 86400.0
+        if age >= ttl_days:
+            os.remove(p)
+            removed.append((os.path.basename(p), round(age, 1)))
+    if removed:
+        for name, age in removed:
+            print(f"removed {name} ({age}d old)")
+    else:
+        print(f"nothing to prune (kept latest + current; none older than {ttl_days:g}d)")
+
+
+# --- ledger parsing ----------------------------------------------------------
 def parse_entries(path):
     """Return (entries, lines). An entry is a '### ' block up to the next
-    '### ' / '## ' boundary, ignoring lines inside HTML comments."""
+    '### ' / '## ' boundary, ignoring lines inside HTML comments. Each entry
+    captures id, kind, date, status (from the '### id · kind · date · status'
+    header) and Refs."""
     if not os.path.exists(path):
         return [], []
     lines = open(path).read().split("\n")
     n = len(lines)
 
-    # Entry start lines (outside comments).
     starts = []
     in_comment = False
     for idx, line in enumerate(lines):
@@ -80,7 +193,15 @@ def parse_entries(path):
             if line.startswith("### ") or line.startswith("## "):
                 end = j
                 break
+
+        header = lines[s][4:]
+        parts = [p.strip() for p in header.split("·")]
         m = re.match(r"### (\S+)", lines[s])
+        eid = m.group(1) if m else (parts[0].split()[0] if parts and parts[0] else None)
+        kind = parts[1].lower() if len(parts) > 1 else ""
+        date = parts[2] if len(parts) > 2 else ""
+        status = parts[3].lower() if len(parts) > 3 else ""
+
         refs = []
         for line in lines[s:end]:
             rm = re.match(r"\*\*Refs:\*\*\s*(.*)", line)
@@ -90,13 +211,14 @@ def parse_entries(path):
                     if tok:
                         refs.append(tok)
         entries.append(
-            {"id": m.group(1) if m else None, "start": s, "end": end, "refs": refs}
+            {"id": eid, "start": s, "end": end, "refs": refs,
+             "kind": kind, "date": date, "status": status}
         )
     return entries, lines
 
 
 def is_filelike(ref):
-    if ref.startswith("#") or "://" in ref:
+    if ref.startswith("#") or ref.startswith("[[") or "://" in ref:
         return False
     path = ref.split(":")[0]
     return ("/" in path) or bool(re.search(r"\.\w+$", path))
@@ -107,22 +229,72 @@ def ref_exists(ref):
     return os.path.exists(os.path.join(ROOT, path))
 
 
+def today():
+    override = os.environ.get("MEM_NOW", "").strip()
+    if override:
+        try:
+            return datetime.date.fromisoformat(override)
+        except ValueError:
+            pass  # malformed override degrades to the real date, never crashes
+    return datetime.date.today()
+
+
+def age_days(date_str):
+    try:
+        return (today() - datetime.date.fromisoformat(date_str.strip())).days
+    except Exception:
+        return None
+
+
 def cmd_gc_scan():
-    entries, _ = parse_entries(LEDGER)
+    entries, lines = parse_entries(LEDGER)
+    # Map each [[target]] to the entries that cross-link it, scoped to each
+    # entry's own block. An entry is "still load-bearing" only if some OTHER
+    # entry links it; a self-link must not immunize an entry from the stale rule.
+    # Note: only *file* refs count as a live anchor (see the `not live` check);
+    # a bare [[id]] or URL ref is not an anchor, just a cross-link.
+    mentions = {}
+    for e in entries:
+        block = "\n".join(lines[e["start"]:e["end"]])
+        for tgt in re.findall(r"\[\[([^\]]+)\]\]", block):
+            mentions.setdefault(tgt.strip(), set()).add(e["id"])
+
+    def referenced_by_other(eid):
+        return any(src != eid for src in mentions.get(eid, ()))
+
     candidates = []
     for e in entries:
-        filerefs = [r for r in e["refs"] if is_filelike(r)]
-        if not filerefs:
+        kind, status = e["kind"], e["status"]
+        # Protect the load-bearing kinds outright.
+        if kind == "invariant":
             continue
-        missing = [r for r in filerefs if not ref_exists(r)]
-        if missing and len(missing) == len(filerefs):
-            candidates.append((e["id"], missing))
+        if kind == "open-question" and status in ("", "active"):
+            continue
+
+        reasons = []
+        if status.startswith("superseded"):
+            reasons.append("superseded")
+
+        filerefs = [r for r in e["refs"] if is_filelike(r)]
+        live = [r for r in filerefs if ref_exists(r)]
+        if filerefs and not live:
+            reasons.append("all file Refs missing")
+
+        # Ref-less / no-live-anchor garbage: old and cross-linked by no other entry.
+        if not live:
+            a = age_days(e["date"])
+            if a is not None and a >= STALE_DAYS and not referenced_by_other(e["id"]):
+                reasons.append(f"stale: no live anchor, {a}d old, unreferenced")
+
+        if reasons:
+            candidates.append((e["id"], reasons))
+
     if not candidates:
-        print("no demote candidates: every ledger entry's file Refs exist on disk")
+        print("no demote candidates: ledger entries are anchored, fresh, or load-bearing")
         return
-    print("demote candidates (all file Refs missing — referenced code is gone):")
-    for eid, missing in candidates:
-        print(f"  {eid}: missing {', '.join(missing)}")
+    print("demote candidates:")
+    for eid, reasons in candidates:
+        print(f"  {eid}: {'; '.join(reasons)}")
     print("\nReview each (judgment stays yours), then: mem demote <id>")
 
 
@@ -154,7 +326,13 @@ def cmd_ls():
 
 def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
-    if cmd == "gc-scan":
+    if cmd == "ws-path":
+        cmd_ws_path()
+    elif cmd == "ws-latest":
+        cmd_ws_latest()
+    elif cmd == "ws-gc":
+        cmd_ws_gc()
+    elif cmd == "gc-scan":
         cmd_gc_scan()
     elif cmd == "demote":
         if len(sys.argv) < 3:
@@ -164,7 +342,7 @@ def main():
     elif cmd == "ls":
         cmd_ls()
     else:
-        print("usage: mem {gc-scan | demote <id> | ls}", file=sys.stderr)
+        print("usage: mem {ws-path | ws-latest | ws-gc | gc-scan | demote <id> | ls}", file=sys.stderr)
         sys.exit(1)
 
 

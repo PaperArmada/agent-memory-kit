@@ -47,12 +47,19 @@ else
   PRESSURE="(ok)"
 fi
 
-# Working-set staleness: minutes since last modified. Stale working set after a
-# resume is a hint that step-1 updates lapsed (possibly a crash mid-step).
+# Working-set staleness: minutes since the most-recent working set was written.
+# Working sets are per-session (working-set.<id>.md), all in the same directory.
+# The stem is fixed ("working-set" — mem writes that regardless of any
+# WORKING_SET_FILE name override, which only affects the legacy single file), so
+# age the most recent of them. (Accumulation/cleanup of session files is observed
+# on demand with `mem ws-gc`, not nagged here every checkpoint.)
+WS_DIR="$(dirname "${WORKING_SET_FILE}")"
+WS_LATEST="$(ls -t "${WS_DIR}"/working-set*.md 2>/dev/null | head -1)"
+[[ -z "${WS_LATEST}" && -f "${WORKING_SET_FILE}" ]] && WS_LATEST="${WORKING_SET_FILE}"
 AGE_STR="n/a"
-if [[ -f "${WORKING_SET_FILE}" ]]; then
+if [[ -n "${WS_LATEST}" && -f "${WS_LATEST}" ]]; then
   NOW=$(date +%s)
-  MTIME=$(stat -c %Y "${WORKING_SET_FILE}" 2>/dev/null || stat -f %m "${WORKING_SET_FILE}" 2>/dev/null || echo "${NOW}")
+  MTIME=$(stat -c %Y "${WS_LATEST}" 2>/dev/null || stat -f %m "${WS_LATEST}" 2>/dev/null || echo "${NOW}")
   AGE_MIN=$(( (NOW - MTIME) / 60 ))
   AGE_STR="${AGE_MIN}m"
 fi
