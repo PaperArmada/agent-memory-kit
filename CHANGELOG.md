@@ -3,6 +3,29 @@
 All notable changes to the pre-compaction memory kit. Versioning is [SemVer](https://semver.org).
 Pre-1.0 (`0.y.z`): the layout, protocol, and tool surface may change between minor versions.
 
+## 0.7.0 — 2026-06-27
+
+Robustness fix: per-project hook wiring is now resilient to the working directory
+Claude Code runs a hook from.
+
+### Fixed
+- Per-project installs wired hooks with a bare relative path
+  (`.claude/hooks/checkpoint.sh`). Claude Code does not guarantee a hook runs from
+  the project root, and `CLAUDE_PROJECT_DIR` is not reliably set, so a hook fired
+  from another directory (e.g. `$HOME`) failed with
+  `checkpoint.sh: not found` and silently skipped the checkpoint. Installs now
+  wire `cd "${CLAUDE_PROJECT_DIR:-<project>}" && …`, which resolves the hook from
+  the project root regardless of the runtime cwd and keeps memory anchored to that
+  project. Re-running the installer **migrates** older relative wiring in place
+  (removes the stale group, adds the robust one) instead of leaving a duplicate
+  that fires from the wrong directory. A user's own (non-kit) hooks are untouched.
+  (`--global` already wired absolute paths and is unaffected.)
+
+### Added
+- `tests/install.test.sh`: migration + cwd-robustness coverage — old relative
+  wiring is replaced not duplicated, the wired command succeeds when run from an
+  unrelated directory, and unrelated user hooks survive a re-install.
+
 ## 0.6.0 — 2026-06-25
 
 Global install: leverage the kit across every project automatically, with no

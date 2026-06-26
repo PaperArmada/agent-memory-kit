@@ -337,11 +337,12 @@ done
 # merges the result into the target settings.json. Re-running never duplicates a
 # hook (dedupe by event + matcher + command set) and never touches unrelated
 # settings. python3 is a stated kit requirement.
-python3 - "${KIT_DIR}/templates/settings.snippet.json" "${SETTINGS}" "${REMOVED}" <<'PY'
-import json, sys, os
+python3 - "${KIT_DIR}/templates/settings.snippet.json" "${SETTINGS}" "${TARGET}" "${REMOVED}" "${HOOKS[@]}" <<'PY'
+import json, re, sys, os
 
-snippet_path, settings_path = sys.argv[1], sys.argv[2]
-removed_hooks = sys.argv[3].split() if len(sys.argv) > 3 and sys.argv[3].strip() else []
+snippet_path, settings_path, proj = sys.argv[1], sys.argv[2], sys.argv[3]
+removed_hooks = sys.argv[4].split() if sys.argv[4].strip() else []
+kit_hooks = sys.argv[5:]
 
 with open(snippet_path) as f:
     snippet = json.load(f)
@@ -355,6 +356,17 @@ def strip(obj):
 
 desired = strip(snippet).get("hooks", {})
 
+# Make the wiring robust to the working directory Claude Code runs a hook from
+# (it is NOT guaranteed to be the project root, and CLAUDE_PROJECT_DIR is not
+# reliably set): cd into the project first — via CLAUDE_PROJECT_DIR when present,
+# else an absolute fallback baked at install time — so a relative
+# .claude/hooks/<x> path always resolves and memory stays anchored to THIS project.
+for event, groups in desired.items():
+    for g in groups:
+        for h in g.get("hooks", []):
+            if "command" in h:
+                h["command"] = 'cd "${CLAUDE_PROJECT_DIR:-%s}" && %s' % (proj, h["command"])
+
 settings = {}
 if os.path.exists(settings_path):
     with open(settings_path) as f:
@@ -363,45 +375,37 @@ if os.path.exists(settings_path):
 
 hooks = settings.setdefault("hooks", {})
 
-def sig(group):
-    cmds = tuple(sorted(h.get("command", "") for h in group.get("hooks", [])))
-    return (group.get("matcher", ""), cmds)
+# Remove any existing kit-managed group (any path form — relative, cd-wrapped, or
+# absolute; current hooks or ones a prior version placed) before re-adding the
+# current wiring. This keeps re-install idempotent AND migrates older relative
+# wiring to the robust form, rather than leaving a stale duplicate that fires from
+# the wrong directory. Matches a whole hook basename, so a user's own hooks and
+# unrelated commands are untouched.
+managed = list(dict.fromkeys(list(kit_hooks) + removed_hooks))
+pats = [re.compile(r'\.claude/hooks/' + re.escape(k) + r'(?![\w.\-])') for k in managed]
+def refs_kit(group):
+    return any(p.search(h.get("command", "")) for h in group.get("hooks", []) for p in pats)
+
+replaced = 0
+for event in list(hooks.keys()):
+    before = len(hooks[event])
+    hooks[event] = [g for g in hooks[event] if not refs_kit(g)]
+    replaced += before - len(hooks[event])
+    if not hooks[event]:
+        del hooks[event]
 
 added = 0
 for event, groups in desired.items():
-    tgt = hooks.setdefault(event, [])
-    existing = {sig(g) for g in tgt}
-    for g in groups:
-        if sig(g) not in existing:
-            tgt.append(g)
-            existing.add(sig(g))
-            added += 1
-
-# Prune hook groups that invoke a kit hook this version removed, so the wiring
-# does not dangle after a hook is dropped or renamed.
-pruned = 0
-if removed_hooks:
-    def refs_removed(group):
-        for h in group.get("hooks", []):
-            cmd = h.get("command", "")
-            if any(f".claude/hooks/{r}" in cmd for r in removed_hooks):
-                return True
-        return False
-    for event in list(hooks.keys()):
-        before = len(hooks[event])
-        hooks[event] = [g for g in hooks[event] if not refs_removed(g)]
-        pruned += before - len(hooks[event])
-        if not hooks[event]:
-            del hooks[event]
+    hooks.setdefault(event, []).extend(groups)
+    added += len(groups)
 
 with open(settings_path, "w") as f:
     json.dump(settings, f, indent=2)
     f.write("\n")
 
-msg = f"settings: wired {added} new hook group(s)" if added else "settings: already wired, no change"
-if pruned:
-    msg += f", pruned {pruned} stale group(s)"
-print(f"{msg} ({settings_path})")
+print(f"settings: wired {added} kit hook group(s)"
+      + (f", replaced {replaced} prior" if replaced else "")
+      + f" ({settings_path})")
 PY
 
 # --- Record install state (version + managed hooks) for future updates -------

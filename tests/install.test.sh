@@ -164,6 +164,30 @@ printf 'CHECKPOINT_FILE="%s/memory/ws-pinned.md"\n' "${T1}" >> "${CFG13}"
 OUT13="$(bash "${INSTALL}" "${T1}" 2>&1)"
 check "re-install warns on pinned CHECKPOINT_FILE"  "printf '%s' \"\${OUT13}\" | grep -q 'disables per-session isolation'"
 
+echo "== test 14: hooks are cwd-robust (cd-wrapped) and old relative wiring migrates =="
+T14="${WORK}/t14"; mkdir -p "${T14}/.claude"; ( cd "${T14}" && git init -q )
+# Simulate a pre-0.7 install's bare-relative kit wiring.
+cat > "${T14}/.claude/settings.json" <<'JSON'
+{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":".claude/hooks/checkpoint.sh"}]}]}}
+JSON
+bash "${INSTALL}" "${T14}" >/dev/null 2>&1
+S14="${T14}/.claude/settings.json"
+check "Stop migrated to a single group (not duplicated)" "[ \"\$(jq_groups '${S14}' Stop)\" = '1' ]"
+check "Stop command is cwd-robust (cd into project)"      "grep -qF '\${CLAUDE_PROJECT_DIR:-${T14}}' '${S14}'"
+check "bare-relative kit command no longer present"       "! grep -qF '\".claude/hooks/checkpoint.sh\"' '${S14}'"
+# The wired Stop command actually runs from an unrelated cwd (the original bug).
+STOPCMD="$(python3 -c "import json;print([h['command'] for g in json.load(open('${S14}'))['hooks']['Stop'] for h in g['hooks']][0])")"
+check "wired Stop command succeeds when run from \$HOME"   "( cd \"\$HOME\" && /bin/sh -c \"\${STOPCMD}\" </dev/null >/dev/null 2>&1 )"
+# A user's own hook with an unrelated command is left untouched.
+python3 - "${S14}" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+d["hooks"].setdefault("Stop",[]).append({"matcher":"","hooks":[{"type":"command","command":".claude/hooks/my-own.sh"}]})
+json.dump(d,open(sys.argv[1],"w"))
+PY
+bash "${INSTALL}" "${T14}" >/dev/null 2>&1
+check "re-install leaves the user's own hook intact" "grep -qF 'my-own.sh' '${S14}'"
+
 echo
 echo "passed: ${PASS}  failed: ${FAIL}"
 [ "${FAIL}" -eq 0 ]
