@@ -42,6 +42,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -n "${CHECKPOINT_PROJECT_DIR:-}" ]]; then
   PROJECT_DIR="${CHECKPOINT_PROJECT_DIR}"
 else
+  # The installer wires `cd "${CLAUDE_PROJECT_DIR}"` in front of this hook, so by
+  # default we resolve from the session's LAUNCH directory. But the agent may
+  # have `cd`'d into a sub-repo to do its work (e.g. the session launched from a
+  # non-git container that holds several repos). In that case the agent's
+  # `mem ws-path` resolved to the sub-repo and wrote its Now there, while we are
+  # still at the launch dir — the session's memory would split across two files.
+  # `mem ws-dir` returns the git work tree the agent last resolved (a breadcrumb
+  # it leaves on ws-path/ws-latest); follow it so our checkpoint lands in the
+  # SAME working-set file. Best-effort: no breadcrumb (the common single-repo
+  # case) means no cd and behavior is unchanged.
+  BREADCRUMB_DIR="$(python3 "${SCRIPT_DIR}/mem" ws-dir 2>/dev/null || true)"
+  if [[ -n "${BREADCRUMB_DIR}" && -d "${BREADCRUMB_DIR}" ]]; then
+    cd "${BREADCRUMB_DIR}" 2>/dev/null || true
+  fi
   # Resolve from the visible cwd; ignore an inherited GIT_DIR/GIT_WORK_TREE so a
   # directory that exports them cannot steer where memory is written. (Worktrees
   # use a .git file, not these env vars, so this does not affect them.)

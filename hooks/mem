@@ -19,8 +19,13 @@ Commands:
                      template if absent). Where you WRITE your Now block.
   mem ws-latest      Print the most-recently-touched working-set file. Where a
                      fresh session READS to resume (may be a prior effort's).
+  mem ws-dir         Print the git work tree this session last resolved (the
+                     breadcrumb the checkpoint hook follows so its checkpoint
+                     lands in the same file as your Now, even when the session
+                     launched from a different/non-git dir). Empty if none.
   mem ws-gc          Prune working-set files older than WS_TTL_DAYS (default 14),
-                     always keeping the latest and the current session's.
+                     always keeping the latest and the current session's; also
+                     prunes stale session breadcrumbs by the same TTL.
   mem gc-scan        List ledger demote candidates: file Refs gone, OR explicitly
                      superseded, OR stale (no live code anchor, older than
                      LEDGER_STALE_DAYS and unreferenced). Invariants and active
@@ -44,19 +49,24 @@ import sys
 
 
 def project_root():
+    """Resolve the project root and whether it came from an organic git
+    resolution (as opposed to an explicit CHECKPOINT_PROJECT_DIR override or a
+    non-git cwd fallback). The second value gates the session breadcrumb below:
+    only a real, override-free git root is worth recording as "where the agent
+    is working", so the hook's own override-driven call can never poison it."""
     r = os.environ.get("CHECKPOINT_PROJECT_DIR")
     if r:
-        return r
+        return r, False
     try:
         out = subprocess.check_output(
             ["git", "rev-parse", "--show-toplevel"], stderr=subprocess.DEVNULL
         )
-        return out.decode().strip()
+        return out.decode().strip(), True
     except Exception:
-        return os.getcwd()
+        return os.getcwd(), False
 
 
-ROOT = project_root()
+ROOT, ROOT_FROM_GIT = project_root()
 LEDGER = os.environ.get("LEDGER_FILE", os.path.join(ROOT, "memory/ledger.md"))
 ARCHIVE = os.environ.get("ARCHIVE_FILE", os.path.join(ROOT, "memory/archive.md"))
 STALE_DAYS = int(os.environ.get("LEDGER_STALE_DAYS", "30"))
@@ -105,6 +115,79 @@ def ws_path():
     return os.path.join(ROOT, "memory", name)
 
 
+# --- session->dir breadcrumb -------------------------------------------------
+# A Claude Code session is anchored to its LAUNCH directory; the checkpoint hook
+# resolves from there. But the agent may `cd` into a sub-repo to do its work, so
+# its `mem ws-path` resolves to a DIFFERENT root than the hook. Left alone, the
+# session's memory splits: the agent writes its narrative to the sub-repo while
+# the hook writes empty auto-checkpoints to the launch dir. The hook cannot see
+# the agent's transient Bash cwd, so the agent leaves a breadcrumb (the git root
+# it resolved) keyed by session, and the hook follows it (see `ws-dir`). Result:
+# both writers land in the same working-set file. Best-effort throughout; a
+# missing or unwritable breadcrumb just falls back to the launch-dir behavior.
+def breadcrumb_path():
+    key = session_key()
+    if not key:
+        return None
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache"
+    )
+    return os.path.join(base, "agent-memory-kit", "sessions", f"{key}.dir")
+
+
+def record_breadcrumb():
+    """Record this session's resolved git root, but only when it WAS an organic
+    git resolution. Skipped under a CHECKPOINT_PROJECT_DIR override (the hook's
+    own call) and for non-git cwd fallbacks, so the recorded dir always points
+    at a real work tree the agent chose."""
+    if not ROOT_FROM_GIT:
+        return
+    p = breadcrumb_path()
+    if not p:
+        return
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        # Write-then-rename so a hook reading concurrently never sees a
+        # half-written (empty) breadcrumb and skip the follow. os.replace is
+        # atomic within the dir; the pid suffix avoids two writers sharing tmp.
+        tmp = f"{p}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            f.write(ROOT + "\n")
+        os.replace(tmp, p)
+    except Exception:
+        pass  # never let a breadcrumb failure break ws-path
+
+
+def read_breadcrumb():
+    p = breadcrumb_path()
+    if not p:
+        return None
+    try:
+        with open(p) as f:
+            d = f.read().strip()
+    except Exception:
+        return None
+    if not d or not os.path.isdir(d):
+        return None
+    # Follow only a dir that is STILL a git work tree. The breadcrumb is
+    # validated at record time, but a `.git` removed before the hook fires
+    # would otherwise steer the checkpoint into a now-non-git directory.
+    try:
+        subprocess.check_output(
+            ["git", "-C", d, "rev-parse", "--show-toplevel"],
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return None
+    return d
+
+
+def cmd_ws_dir():
+    d = read_breadcrumb()
+    if d:
+        print(d)
+
+
 def ws_glob():
     return sorted(
         glob.glob(os.path.join(ROOT, "memory", "working-set*.md")),
@@ -114,6 +197,7 @@ def ws_glob():
 
 
 def cmd_ws_path():
+    record_breadcrumb()  # remember where the agent is working, for the hook
     p = ws_path()
     if not os.path.exists(p):
         os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -123,6 +207,7 @@ def cmd_ws_path():
 
 
 def cmd_ws_latest():
+    record_breadcrumb()  # a resume reads here from the work dir; record it too
     files = ws_glob()
     if files:
         print(files[0])
@@ -146,6 +231,22 @@ def cmd_ws_gc():
         if age >= ttl_days:
             os.remove(p)
             removed.append((os.path.basename(p), round(age, 1)))
+    # Prune stale session breadcrumbs by the same TTL (they live outside the
+    # project, so they are not covered by the working-set sweep above).
+    bc = breadcrumb_path()
+    bc_dir = os.path.dirname(bc) if bc else None
+    if bc_dir and os.path.isdir(bc_dir):
+        for name in os.listdir(bc_dir):
+            fp = os.path.join(bc_dir, name)
+            try:
+                if os.path.abspath(fp) == os.path.abspath(bc):
+                    continue  # keep this session's own breadcrumb
+                age = (now - os.path.getmtime(fp)) / 86400.0
+                if age >= ttl_days:
+                    os.remove(fp)
+                    removed.append((name, round(age, 1)))
+            except Exception:
+                pass
     if removed:
         for name, age in removed:
             print(f"removed {name} ({age}d old)")
@@ -330,6 +431,8 @@ def main():
         cmd_ws_path()
     elif cmd == "ws-latest":
         cmd_ws_latest()
+    elif cmd == "ws-dir":
+        cmd_ws_dir()
     elif cmd == "ws-gc":
         cmd_ws_gc()
     elif cmd == "gc-scan":
@@ -342,7 +445,7 @@ def main():
     elif cmd == "ls":
         cmd_ls()
     else:
-        print("usage: mem {ws-path | ws-latest | ws-gc | gc-scan | demote <id> | ls}", file=sys.stderr)
+        print("usage: mem {ws-path | ws-latest | ws-dir | ws-gc | gc-scan | demote <id> | ls}", file=sys.stderr)
         sys.exit(1)
 
 

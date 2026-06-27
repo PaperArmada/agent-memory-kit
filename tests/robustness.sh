@@ -20,6 +20,9 @@ KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL="${KIT_DIR}/install.sh"
 WORK="$(mktemp -d)"
 trap 'cd /; rm -rf "${WORK}"' EXIT
+# Isolate session breadcrumbs (mem records the resolved git root under
+# XDG_CACHE_HOME) so the harness never reads or writes the real ~/.cache.
+export XDG_CACHE_HOME="${WORK}/cache"
 
 STRICT=0
 [[ "${1:-}" == "--strict" ]] && STRICT=1
@@ -214,6 +217,37 @@ if grep -q 'Checkpoint (auto)' "${S5}/memory/working-set.md" 2>/dev/null; then
   verdict "non-git-project" safe "checkpoint writes a usable working set without git"
 else
   verdict "non-git-project" unsafe "checkpoint did not produce a working set in a non-git project"
+fi
+
+# ---------------------------------------------------------------------------
+# Scenario 6: container launch does not split the session's memory.
+# A session launched from a NON-git container that holds git sub-repos: the
+# hook resolves the launch dir (container) while the agent `cd`s into a sub-repo
+# and writes its Now there. Without the breadcrumb, the session's memory splits
+# (empty auto-checkpoints in the container, narrative in the sub-repo, and the
+# PreCompact snapshot lands in the empty file). Target invariant: one coherent
+# working set in the sub-repo (auto-block + Now together) and NO session-keyed
+# working set written into the container (its install-seeded plain working-set.md
+# is expected and is not part of the split). Models the real installs: container
+# and sub-repo each have the kit; the container's hook follows a breadcrumb left
+# by the sub-repo's mem.
+# ---------------------------------------------------------------------------
+S6="${WORK}/s6"; SUB6="${S6}/sub"; mkdir -p "${SUB6}"   # S6 is NOT a git repo
+( cd "${SUB6}" && git init -q && git -c core.hooksPath=/dev/null commit -q --no-verify --allow-empty -m init )
+install_kit "${S6}"; install_kit "${SUB6}"
+SID6="ffffffff-1111-2222-3333-444444444444"
+# Agent works in the sub-repo: resolves its own working set (no override, real
+# cwd) — this records the breadcrumb — then writes its Now there.
+WS6="$( cd "${SUB6}" && CLAUDE_CODE_SESSION_ID="${SID6}" python3 "${SUB6}/.claude/hooks/mem" ws-path )"
+author_working_set "${WS6}" "wire pull consumer" "HYP6_split_brain_closed" "NEXT6_push"
+# Hook fires from the CONTAINER exactly as the installer wires it (cd in front,
+# no CHECKPOINT_PROJECT_DIR), and must follow the breadcrumb into the sub-repo.
+( cd "${S6}" && CLAUDE_CODE_SESSION_ID="${SID6}" CHECKPOINT_FORCE=1 bash "${S6}/.claude/hooks/checkpoint.sh" >/dev/null 2>&1 )
+if grep -qE '<!-- checkpoint [0-9]{4}-' "${WS6}" && grep -q HYP6_split_brain_closed "${WS6}" \
+   && [[ ! -e "${S6}/memory/working-set.ffffffff.md" ]]; then
+  verdict "container-launch-split" safe "container-launched session keeps one working set in the sub-repo; hook followed the agent; no split"
+else
+  verdict "container-launch-split" unsafe "session memory split: auto-checkpoint and Now landed in different dirs"
 fi
 
 echo

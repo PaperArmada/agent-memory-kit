@@ -12,6 +12,9 @@ set -uo pipefail
 KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'cd /; rm -rf "${WORK}"' EXIT
+# Isolate session breadcrumbs (mem records the resolved git root under
+# XDG_CACHE_HOME) so the suite never reads or writes the real ~/.cache.
+export XDG_CACHE_HOME="${WORK}/cache"
 
 PASS=0; FAIL=0
 ok()  { printf '  ok   %s\n' "$1"; PASS=$((PASS+1)); }
@@ -89,6 +92,45 @@ echo "== demote moves nominee to archive, drops from ledger =="
 CHECKPOINT_PROJECT_DIR="${P}" python3 "${MEM}" demote dead-ref >/dev/null 2>&1
 check "demoted entry removed from ledger"          "! grep -q 'dead-ref' '${P}/memory/ledger.md'"
 check "demoted entry appended to archive"          "grep -q 'dead-ref' '${P}/memory/archive.md'"
+
+echo "== session breadcrumb (hook follows the agent's work dir) =="
+# A real git repo the "agent" cd's into, with NO CHECKPOINT_PROJECT_DIR override:
+# this is the organic resolution that should be recorded. Use --no-... so a
+# global commit-msg hook (core.hooksPath) can't reject the seed commit.
+REPO="${WORK}/repo"; mkdir -p "${REPO}"
+( cd "${REPO}" && git init -q && git -c core.hooksPath=/dev/null -c commit.gpgsign=false commit -q --allow-empty -m seed )
+BC="${WORK}/cache/agent-memory-kit/sessions/cccccccc.dir"
+( cd "${REPO}" && CLAUDE_CODE_SESSION_ID=cccccccc-x python3 "${MEM}" ws-path >/dev/null )
+check "organic git resolution records a breadcrumb"   "[ -f '${BC}' ]"
+check "breadcrumb points at the resolved git root"    "[ \"\$(cat '${BC}')\" = \"\$(cd '${REPO}' && git rev-parse --show-toplevel)\" ]"
+check "ws-dir prints the breadcrumb dir"              "[ \"\$( CLAUDE_CODE_SESSION_ID=cccccccc-x python3 '${MEM}' ws-dir )\" = \"\$(cd '${REPO}' && git rev-parse --show-toplevel)\" ]"
+
+# The hook's OWN call passes CHECKPOINT_PROJECT_DIR; it must NOT overwrite the
+# breadcrumb with the launch dir (that would re-open the split it exists to close).
+( cd "${REPO}" && CHECKPOINT_PROJECT_DIR="${P}" CLAUDE_CODE_SESSION_ID=cccccccc-x python3 "${MEM}" ws-path >/dev/null )
+check "override call does NOT poison the breadcrumb"  "[ \"\$(cat '${BC}')\" = \"\$(cd '${REPO}' && git rev-parse --show-toplevel)\" ]"
+
+# A non-git cwd resolves via fallback and must not record anything.
+mkdir -p "${WORK}/plain"
+( cd "${WORK}/plain" && CLAUDE_CODE_SESSION_ID=dddddddd-x python3 "${MEM}" ws-path >/dev/null )
+check "non-git fallback records no breadcrumb"        "[ ! -f '${WORK}/cache/agent-memory-kit/sessions/dddddddd.dir' ]"
+
+# A stale breadcrumb (dir gone) is ignored, not blindly followed.
+echo "${WORK}/vanished" > "${WORK}/cache/agent-memory-kit/sessions/eeeeeeee.dir"
+check "ws-dir ignores a breadcrumb whose dir is gone" "[ -z \"\$( CLAUDE_CODE_SESSION_ID=eeeeeeee-x python3 '${MEM}' ws-dir )\" ]"
+
+# A breadcrumb dir that still EXISTS but is no longer a git work tree (e.g. .git
+# removed after recording) must not be followed — else the hook would steer a
+# checkpoint into a non-git directory.
+mkdir -p "${WORK}/exgit"
+echo "${WORK}/exgit" > "${WORK}/cache/agent-memory-kit/sessions/99999999.dir"
+check "ws-dir ignores a now-non-git breadcrumb dir"  "[ -z \"\$( CLAUDE_CODE_SESSION_ID=99999999-x python3 '${MEM}' ws-dir )\" ]"
+
+# ws-gc prunes a stale breadcrumb by TTL while keeping the current session's.
+setmtime "${WORK}/cache/agent-memory-kit/sessions/eeeeeeee.dir" "$(( NOW_TS - 30*86400 ))"
+( cd "${REPO}" && CLAUDE_CODE_SESSION_ID=cccccccc-x WS_TTL_DAYS=14 python3 "${MEM}" ws-gc >/dev/null )
+check "ws-gc prunes a stale breadcrumb"               "[ ! -f '${WORK}/cache/agent-memory-kit/sessions/eeeeeeee.dir' ]"
+check "ws-gc keeps the current session's breadcrumb"  "[ -f '${BC}' ]"
 
 echo
 echo "passed: ${PASS}  failed: ${FAIL}"

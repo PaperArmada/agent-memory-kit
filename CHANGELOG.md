@@ -3,6 +3,39 @@
 All notable changes to the pre-compaction memory kit. Versioning is [SemVer](https://semver.org).
 Pre-1.0 (`0.y.z`): the layout, protocol, and tool surface may change between minor versions.
 
+## 0.8.0 — 2026-06-27
+
+Robustness fix: a session's memory no longer splits when the session is launched
+from a directory whose git root differs from where the agent actually works
+(most sharply, a non-git container holding several git sub-repos).
+
+### Fixed
+- A Claude Code session is anchored to its launch directory, and the checkpoint
+  hook resolves from there, but the agent may `cd` into a sub-repo to work, so
+  its `mem ws-path` resolves to a different root. The two writers then diverged:
+  the agent wrote its narrative ("Now") to the sub-repo's working set while the
+  hook wrote empty, branch-`-` auto-checkpoints to the launch dir, and the
+  PreCompact snapshot landed in the empty file. The hook cannot see the agent's
+  transient working directory, so `mem` now records the git root it organically
+  resolves as a per-session breadcrumb (under `XDG_CACHE_HOME`, keyed by session
+  id), and the hook follows it (`mem ws-dir`) before resolving. Both writers land
+  in the same working-set file, and the hook's checkpoint reports the sub-repo's
+  real branch/sha instead of `-`. The breadcrumb is recorded only for override-
+  free git resolutions, so the hook's own call cannot poison it; the common
+  single-repo case is unchanged (breadcrumb equals launch dir). Known behavior:
+  a session that works across multiple sub-repos leaves its checkpoints following
+  the most-recently-resolved one; and two sessions whose ids share the first
+  8 hex chars (already collided on working-set filename) now also share a
+  breadcrumb, so one may follow the other's work dir (≈1-in-4-billion).
+
+### Added
+- `mem ws-dir` prints the work tree the session last resolved (empty if none);
+  `mem ws-gc` also prunes stale session breadcrumbs by `WS_TTL_DAYS`.
+- `tests/mem.test.sh`: breadcrumb recording (organic git only), override non-
+  poisoning, non-git fallback records nothing, stale-breadcrumb is ignored, and
+  ws-gc breadcrumb pruning. `tests/robustness.sh`: a container-launch-split
+  scenario, verified to flip UNSAFE without the hook's breadcrumb follow.
+
 ## 0.7.0 — 2026-06-27
 
 Robustness fix: per-project hook wiring is now resilient to the working directory

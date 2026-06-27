@@ -15,6 +15,8 @@ KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL="${KIT_DIR}/install.sh"
 WORK="$(mktemp -d)"
 trap 'cd /; rm -rf "${WORK}"' EXIT
+# Isolate session breadcrumbs away from the real ~/.cache.
+export XDG_CACHE_HOME="${WORK}/cache"
 
 PASS=0; FAIL=0
 ok()  { printf '  ok   %s\n' "$1"; PASS=$((PASS+1)); }
@@ -99,6 +101,17 @@ echo "== test 12: SAFETY — \$HOME being a git repo does NOT collect memory/ ==
 ( cd "${HOME_DIR}" && git init -q )
 ( cd "${HOME_DIR}" && HOME="${HOME_DIR}" CHECKPOINT_FORCE=1 CLAUDE_CODE_SESSION_ID="" MEM_SESSION_ID="" bash "${HD}/checkpoint.sh" >/dev/null 2>&1 )
 check "no memory/ created when \$HOME itself is a repo" "[ ! -e '${HOME_DIR}/memory' ]"
+
+echo "== test 13: SAFETY — REQUIRE_GIT guard holds even when a breadcrumb points at \$HOME =="
+# A session breadcrumb pointing at $HOME (which test 12 made a git repo) is a
+# valid git tree, so the hook WILL follow it — but the REQUIRE_GIT guard must
+# still refuse $HOME and write nothing. Confirms the follow cannot escape the guard.
+mkdir -p "${WORK}/cache/agent-memory-kit/sessions"
+printf '%s\n' "${HOME_DIR}" > "${WORK}/cache/agent-memory-kit/sessions/deadbeef.dir"
+SCRATCH="${WORK}/scratch"; mkdir -p "${SCRATCH}"   # fire from an unrelated non-git dir
+( cd "${SCRATCH}" && HOME="${HOME_DIR}" CHECKPOINT_FORCE=1 CLAUDE_CODE_SESSION_ID="deadbeef-1111" MEM_SESSION_ID="" bash "${HD}/checkpoint.sh" >/dev/null 2>&1 )
+check "breadcrumb to \$HOME does not collect memory/" "[ ! -e '${HOME_DIR}/memory' ]"
+check "breadcrumb follow wrote nothing to scratch"    "[ ! -e '${SCRATCH}/memory' ]"
 
 echo
 echo "passed: ${PASS}  failed: ${FAIL}"
